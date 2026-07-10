@@ -104,7 +104,16 @@ def health():
 def slack_events():
     # Raw body is required for signature verification — read it before parsing.
     raw_body = request.get_data()
+    payload = request.get_json(silent=True) or {}
+    payload_type = payload.get("type")
 
+    # 1. URL verification handshake — respond immediately before signature check.
+    #    This is safe: the challenge value is not sensitive and Slack sends it
+    #    only once when the admin configures Event Subscriptions.
+    if payload_type == "url_verification":
+        return jsonify(challenge=payload.get("challenge"))
+
+    # 2. All other requests must carry a valid Slack signature.
     if not is_valid_slack_request(
         signing_secret=SLACK_SIGNING_SECRET,
         request_body=raw_body,
@@ -114,14 +123,7 @@ def slack_events():
         logger.warning("Rejected request with invalid Slack signature.")
         return jsonify(error="invalid signature"), 403
 
-    payload = request.get_json(silent=True) or {}
-    payload_type = payload.get("type")
-
-    # 1. URL verification handshake (sent once when configuring Event Subscriptions).
-    if payload_type == "url_verification":
-        return jsonify(challenge=payload.get("challenge"))
-
-    # 2. Real event delivery.
+    # 3. Real event delivery.
     if payload_type == "event_callback":
         event_id = payload.get("event_id")
         if _already_processed(event_id):
