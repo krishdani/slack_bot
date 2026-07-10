@@ -83,7 +83,7 @@ All `/tasks/*` endpoints are protected by `DIGEST_TRIGGER_TOKEN` (`?token=...`).
 | --- | --- |
 | `SLACK_BOT_TOKEN` | Bot token (`xoxb-`) |
 | `SLACK_SIGNING_SECRET` | Request verification |
-| `HUMAN_POC_USER_ID` | `U0BCLG7AF7H` — who receives the report |
+| `HUMAN_POC_USER_ID` | Slack user ID (`U…`) of who receives the report |
 | `DIGEST_TRIGGER_TOKEN` | Protects the `/tasks/*` URLs |
 | `DAILY_WINDOW_HOURS` | `24` (temporarily set to `360` for the one-time 15-day catch-up) |
 | `OPENAI_API_KEY` | *(optional)* enables AI classification |

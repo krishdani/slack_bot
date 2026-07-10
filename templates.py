@@ -18,20 +18,46 @@ def format_timestamp(ts):
     return moment.strftime("%b %d, %I:%M %p UTC").replace(" 0", " ", 1)
 
 
-def new_member_message(name, user_id, joined_ts, workspace=None):
+def new_member_message(
+    name,
+    user_id,
+    joined_ts,
+    workspace=None,
+    email=None,
+    title=None,
+    company=None,
+    timezone=None,
+    channels_joined=None,
+    profile_link=None,
+):
     """Body of the '🎉 New Member Joined' DM."""
     lines = [
         "*Name:*",
         name,
         "",
-        "*Mention:*",
+        "*Slack ID:*",
         f"<@{user_id}>",
         "",
-        "*channel:*",
-        "(required if he had joined any channel)",
+        "*Email (if available):*",
+        email or "Not available",
         "",
-        "*Joined:*",
+        "*Title:*",
+        title or "Not available",
+        "",
+        "*Company:*",
+        company or "Not available",
+        "",
+        "*Timezone:*",
+        timezone or "Not available",
+        "",
+        "*Channels Joined:*",
+        ", ".join(channels_joined or ["Not available"]) if channels_joined else "Not available",
+        "",
+        "*Join Time:*",
         format_timestamp(joined_ts),
+        "",
+        "*Profile Link:*",
+        profile_link or "Not available",
     ]
     if workspace:
         lines += ["", "*Workspace:*", workspace]

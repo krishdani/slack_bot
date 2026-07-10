@@ -57,6 +57,64 @@ def _slack_delay_hint(exc):
     return None
 
 
+def _profile_field(profile, *keys):
+    for key in keys:
+        value = profile.get(key)
+        if value:
+            return value
+    return None
+
+
+def member_profile_data(client, user_id):
+    """Best-effort Slack profile enrichment for new-member alerts."""
+    profile = {
+        "name": "unknown",
+        "email": None,
+        "title": None,
+        "company": None,
+        "timezone": None,
+        "channels_joined": [],
+        "profile_link": None,
+    }
+    if not user_id:
+        return profile
+
+    try:
+        info = client.users_info(user=user_id).get("user", {})
+        profile_data = info.get("profile", {})
+        profile["name"] = (
+            profile_data.get("display_name")
+            or profile_data.get("real_name")
+            or info.get("name")
+            or user_id
+        )
+        profile["email"] = _profile_field(profile_data, "email")
+        profile["title"] = _profile_field(profile_data, "title")
+        profile["company"] = _profile_field(profile_data, "company")
+        profile["timezone"] = _profile_field(profile_data, "tz", "tz_label")
+        team_id = info.get("team_id")
+        if team_id:
+            profile["profile_link"] = f"https://app.slack.com/client/{team_id}/{user_id}"
+    except SlackApiError as e:
+        logger.warning("users_info failed for %s: %s", user_id, e.response.get("error"))
+
+    try:
+        resp = client.users_conversations(
+            user=user_id,
+            types="public_channel,private_channel",
+            limit=100,
+        )
+        profile["channels_joined"] = [
+            channel.get("name") or channel.get("id")
+            for channel in resp.get("channels", [])
+            if channel.get("name") or channel.get("id")
+        ]
+    except Exception as e:  # noqa: BLE001 — best-effort enrichment only
+        logger.debug("users_conversations failed for %s: %s", user_id, e)
+
+    return profile
+
+
 def display_name_of(client, user_id):
     """Return a readable name for a user id, cached. Falls back to the id."""
     if not user_id:

@@ -9,6 +9,7 @@ back empty, is logged and dropped rather than raised.
 """
 
 import logging
+import re
 import time
 
 import background
@@ -28,6 +29,17 @@ _MODERATED_CHANNEL_TYPES = ("channel", "group")
 # --------------------------------------------------------------------------- #
 # Feature 1 — a new member joined
 # --------------------------------------------------------------------------- #
+
+
+def _is_noise_message(text):
+    """Return True for trivial messages that should never hit the AI."""
+    normalized = (text or "").strip()
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    if lowered in {"ok", "thanks", "thank you", "+1", "👍", "👎", "🙌", "lol"}:
+        return True
+    return not re.search(r"[A-Za-z0-9]", normalized)
 
 
 def process_team_join(client, user_id, event_ts=None):
@@ -51,17 +63,27 @@ def process_team_join(client, user_id, event_ts=None):
     if not config.REALTIME_MEMBER_ALERTS:
         return
 
-    notify.notify_handler(
-        title="🎉 New Member Joined",
-        message=templates.new_member_message(
-            name=notify.display_name_of(client, user_id),
-            user_id=user_id,
-            joined_ts=event_ts or time.time(),
-            workspace=notify.workspace_name(client),
-        ),
-        priority="normal",
-        client=client,
-    )
+    try:
+        profile = notify.member_profile_data(client, user_id)
+        notify.notify_handler(
+            title="🎉 New Member Joined",
+            message=templates.new_member_message(
+                name=profile.get("name") or notify.display_name_of(client, user_id),
+                user_id=user_id,
+                joined_ts=event_ts or time.time(),
+                workspace=notify.workspace_name(client),
+                email=profile.get("email"),
+                title=profile.get("title"),
+                company=profile.get("company"),
+                timezone=profile.get("timezone"),
+                channels_joined=profile.get("channels_joined"),
+                profile_link=profile.get("profile_link"),
+            ),
+            priority="normal",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting should never crash the worker
+        logger.exception("team_join_alert_failed user=%s error=%s", user_id, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -85,6 +107,10 @@ def _skip_reason(client, event):
         return "not_a_channel"
 
     text = (event.get("text") or "").strip()
+    if not text:
+        return "empty"
+    if _is_noise_message(text):
+        return "noise"
     if len(text) < config.MODERATION_MIN_CHARS:
         return "too_short"
 
@@ -124,6 +150,8 @@ def process_message_event(client, event):
     channel_name = notify.channel_name_of(client, channel_id)
     author_name = notify.display_name_of(client, user_id)
 
+    logger.info("message_received channel=%s user=%s length=%d", channel_name, user_id, len(text))
+
     verdict = moderation.evaluate(text, channel_name, author_name)
     if verdict is None:
         logger.debug("moderation_skipped reason=channel_not_configured channel=%s",
@@ -141,20 +169,23 @@ def process_message_event(client, event):
         )
         return
 
-    notify.notify_handler(
-        title="⚠️ Channel Moderation Alert",
-        message=templates.moderation_alert(
-            channel_name=channel_name,
-            author_name=author_name,
-            author_id=user_id,
-            timestamp=ts,
-            text=text,
-            verdict=verdict,
-            permalink=notify.permalink(client, channel_id, ts),
-        ),
-        priority="high",
-        client=client,
-    )
+    try:
+        notify.notify_handler(
+            title="⚠️ Channel Moderation Alert",
+            message=templates.moderation_alert(
+                channel_name=channel_name,
+                author_name=author_name,
+                author_id=user_id,
+                timestamp=ts,
+                text=text,
+                verdict=verdict,
+                permalink=notify.permalink(client, channel_id, ts),
+            ),
+            priority="high",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting should never crash the worker
+        logger.exception("moderation_alert_failed channel=%s user=%s error=%s", channel_name, user_id, exc)
 
     logger.info(
         "moderation_alerted channel=%s author=%s source=%s confidence=%.2f "
