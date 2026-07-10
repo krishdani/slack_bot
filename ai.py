@@ -1,9 +1,14 @@
 """Optional AI message classification via OpenAI, with heuristic fallback.
 
-Used ONLY at report time (the daily report), and only when OPENAI_API_KEY is
-set. Messages are sent in batches with their channel name so the model can judge
-whether each fits its channel and whether it needs a reply — far better than
-keywords at spotting "this doesn't belong here".
+Two separate jobs live here:
+
+  1. ``classify_messages`` — batch classification at daily-report time.
+  2. ``moderate_message`` — single-message, real-time channel moderation.
+
+Job 1 is used ONLY at report time (the daily report), and only when
+OPENAI_API_KEY is set. Messages are sent in batches with their channel name so
+the model can judge whether each fits its channel and whether it needs a reply —
+far better than keywords at spotting "this doesn't belong here".
 
 Token-conscious by design:
   - runs at report time only (not per message, not every day unless you trigger it)
@@ -17,6 +22,10 @@ caller falls back to the keyword heuristics in analysis.py — nothing breaks.
 import json
 import logging
 import os
+
+import channel_rules
+import config
+from retry import with_retry
 
 logger = logging.getLogger("tpf-community-bot.ai")
 
@@ -113,3 +122,155 @@ def classify_messages(messages, channel_name_of):
             verdicts[i] = {"official": False, "out_of_place": None, "needs_reply": False}
     logger.info("AI classified %d messages.", len(messages))
     return verdicts
+
+
+# --------------------------------------------------------------------------- #
+# Real-time channel moderation
+# --------------------------------------------------------------------------- #
+
+# Longer cap than the batch path: a single message gets the full context budget.
+MODERATION_MAX_CHARS = 2000
+
+_MODERATION_SYSTEM = (
+    "You are a moderation assistant for a Slack community. You judge whether ONE "
+    "message belongs in the channel where it was posted. A human community "
+    "manager reviews every judgement you make; you never reply to anyone.\n"
+    "\n"
+    "Decide using semantic understanding of the author's INTENT, topic, and tone. "
+    "Never decide on keywords alone. A message that merely mentions a disallowed "
+    "topic is not off-topic — what matters is the purpose the message serves. "
+    "Asking 'is anyone else job hunting?' is a discussion; posting a role with a "
+    "link and requirements is a job posting.\n"
+    "\n"
+    "Rules:\n"
+    "- Default to belongs_to_channel=true. Return false ONLY when the message "
+    "clearly serves a purpose the channel is not for.\n"
+    "- Greetings, thanks, short reactions, jokes and casual replies belong "
+    "anywhere unless the channel explicitly forbids them.\n"
+    "- If the message is ambiguous, truncated, or you cannot tell its intent, "
+    "return belongs_to_channel=true with a low confidence_score. Never guess.\n"
+    "- confidence_score (0.0-1.0) is your confidence in the belongs_to_channel "
+    "value you returned. Use scores above 0.9 only when the case is obvious.\n"
+    "- explanation: one or two plain sentences, grounded ONLY in the message text "
+    "and the channel's stated purpose. Never speculate about the author, their "
+    "employer, or facts not present in the message. Never invent quotes.\n"
+    "- suggested_channel: EXACTLY one channel name from the provided list, or "
+    "null. Never invent a channel. Use null when belongs_to_channel is true, or "
+    "when no listed channel is a better home for the message.\n"
+    "- suggested_reply: a short, warm, professional message the human manager "
+    "could copy and send to the author. Address them by first name, thank them, "
+    "name the better channel, ask them to repost, thank them for understanding. "
+    "Never scold, accuse, or threaten. Use null when belongs_to_channel is true.\n"
+    "\n"
+    'Return STRICT JSON only, exactly these keys: {"belongs_to_channel": bool, '
+    '"confidence_score": number, "explanation": string, "suggested_channel": '
+    'string|null, "suggested_reply": string|null}'
+)
+
+
+def _retriable_openai(exc):
+    """Retry network blips, rate limits and 5xx — not auth or bad-request errors."""
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if status is None:
+        return True  # connection reset / timeout / DNS — worth another try
+    return status == 429 or status >= 500
+
+
+def _validate(raw, channel_name):
+    """Coerce the model's JSON into the verdict shape, dropping anything unsafe."""
+    belongs = bool(raw.get("belongs_to_channel", True))
+
+    try:
+        confidence = float(raw.get("confidence_score", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    explanation = str(raw.get("explanation") or "").strip()
+
+    # Anti-hallucination: only channels that actually exist in the config survive.
+    suggested_channel = channel_rules.resolve_suggested_channel(raw.get("suggested_channel"))
+    if suggested_channel == f"#{channel_name.lstrip('#').lower()}":
+        suggested_channel = None  # suggesting the channel it's already in is noise
+
+    suggested_reply = raw.get("suggested_reply")
+    suggested_reply = str(suggested_reply).strip() if suggested_reply else None
+
+    if belongs:
+        # A "belongs" verdict has nothing to suggest — drop stray fields.
+        suggested_channel, suggested_reply = None, None
+
+    return {
+        "belongs_to_channel": belongs,
+        "confidence_score": confidence,
+        "explanation": explanation,
+        "suggested_channel": suggested_channel,
+        "suggested_reply": suggested_reply,
+    }
+
+
+def moderate_message(text, channel_name, author_name, rules):
+    """Ask the model whether one message belongs in its channel.
+
+    Args:
+        text: The raw message text.
+        channel_name: Channel name without '#'.
+        author_name: Display name, so the suggested reply can greet them.
+        rules: The channel's entry from ``channel_rules``.
+
+    Returns:
+        A verdict dict::
+
+            {"belongs_to_channel": bool, "confidence_score": float,
+             "explanation": str, "suggested_channel": str|None,
+             "suggested_reply": str|None}
+
+        or None when AI is disabled or every attempt failed — the caller then
+        falls back to heuristics.
+    """
+    if not AI_ENABLED or not (text or "").strip():
+        return None
+
+    user_content = json.dumps(
+        {
+            "channel_rules": channel_rules.describe_channel(channel_name, rules),
+            "available_channels": channel_rules.known_channels(),
+            "channel_directory": channel_rules.describe_catalog(),
+            "author_display_name": author_name,
+            "message": text[:MODERATION_MAX_CHARS],
+        }
+    )
+
+    def _call():
+        resp = _get_client().chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _MODERATION_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        return json.loads(resp.choices[0].message.content)
+
+    try:
+        raw = with_retry(
+            _call,
+            attempts=config.AI_MAX_RETRIES + 1,
+            retriable=_retriable_openai,
+            label="openai.moderate_message",
+        )
+    except Exception as e:  # noqa: BLE001 — any failure means "use heuristics"
+        logger.error(
+            "moderation_ai_failed channel=%s error=%s (falling back to heuristics)",
+            channel_name, e,
+        )
+        return None
+
+    if not isinstance(raw, dict):
+        logger.error("moderation_ai_bad_shape channel=%s payload=%r", channel_name, raw)
+        return None
+
+    return _validate(raw, channel_name)

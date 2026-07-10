@@ -1,4 +1,4 @@
-"""TPF Community Bot — daily community report for the Human POC.
+"""TPF Community Bot — community intelligence for the Human POC (the handler).
 
 The bot observes Slack and, once a day, DMs the Human POC a single report:
 
@@ -8,20 +8,30 @@ The bot observes Slack and, once a day, DMs the Human POC a single report:
   3. Messages that may need a reply (unanswered questions/requests).
   4. Messages that look out of place for their channel (with the exact message).
 
-Everything is a flag for the POC to review — the bot takes no action on users.
+It also alerts the handler in real time (see ``handlers.py``):
+
+  * the moment a new member joins, and
+  * whenever a message looks out of place for the channel it was posted in.
+
+Real-time work runs on a background pool so Slack always gets a fast 200.
+
+Everything is a flag for the POC to review — the bot takes no action on users,
+and never replies in a public channel.
 """
 
 import logging
 import os
 import time
+from collections import deque
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 import ai
 import collect
+import config
+import handlers
 import notify
 import store
 from analysis import build_digest, count_flags, count_replies, format_daily_report
@@ -35,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tpf-community-bot")
 
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_BOT_TOKEN = config.SLACK_BOT_TOKEN
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 DIGEST_TRIGGER_TOKEN = os.environ.get("DIGEST_TRIGGER_TOKEN")
 # The daily report covers this many hours of history (default 24).
@@ -45,10 +55,13 @@ if not SLACK_BOT_TOKEN:
     logger.warning("SLACK_BOT_TOKEN is not set — the bot cannot read or DM.")
 if not SLACK_SIGNING_SECRET:
     logger.warning("SLACK_SIGNING_SECRET is not set — request verification will fail.")
-if not notify.HUMAN_POC_USER_ID:
-    logger.warning("HUMAN_POC_USER_ID is not set — the POC cannot be notified.")
+if not config.HANDLER_SLACK_USER:
+    logger.warning(
+        "No handler configured — set HANDLER_SLACK_USER (or HUMAN_POC_USER_ID). "
+        "The daily report and all real-time alerts will be dropped."
+    )
 
-slack_client = WebClient(token=SLACK_BOT_TOKEN)
+slack_client = config.get_slack_client()
 
 app = Flask(__name__)
 
@@ -56,37 +69,24 @@ app = Flask(__name__)
 store.init_db()
 
 # Remember processed event IDs so Slack's automatic retries aren't handled twice.
+# Bounded: with message events flowing through, an unbounded set would grow for
+# the life of the process. The deque evicts the oldest id once we hit the cap.
+_MAX_TRACKED_EVENTS = 5000
 _processed_events = set()
-
-# Cache of the bot's own user ID so we don't count the bot as a joiner.
-_bot_user_id = None
+_processed_order = deque()
 
 
-def get_bot_user_id():
-    """Return (and cache) the bot's own Slack user ID, or None if unavailable."""
-    global _bot_user_id
-    if _bot_user_id is None:
-        try:
-            _bot_user_id = slack_client.auth_test().get("user_id")
-        except SlackApiError as e:
-            logger.error("auth.test failed: %s", e.response.get("error"))
-    return _bot_user_id
-
-
-# --------------------------------------------------------------------------- #
-# Event handlers
-# --------------------------------------------------------------------------- #
-
-
-def handle_new_member(user_id):
-    """Record a new member so they appear in the next daily report.
-
-    The bot does NOT message the member — the POC welcomes them personally.
-    """
-    if not user_id or user_id == get_bot_user_id():
-        return
-    if store.record_member(user_id):
-        logger.info("Recorded new member %s for the daily report.", user_id)
+def _already_processed(event_id):
+    """True if we've handled this event id before. Records it if not."""
+    if not event_id:
+        return False
+    if event_id in _processed_events:
+        return True
+    _processed_events.add(event_id)
+    _processed_order.append(event_id)
+    if len(_processed_order) > _MAX_TRACKED_EVENTS:
+        _processed_events.discard(_processed_order.popleft())
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -124,15 +124,19 @@ def slack_events():
     # 2. Real event delivery.
     if payload_type == "event_callback":
         event_id = payload.get("event_id")
-        if event_id and event_id in _processed_events:
+        if _already_processed(event_id):
+            logger.debug("event_duplicate id=%s", event_id)
             return jsonify(ok=True)  # Duplicate retry — already handled.
-        if event_id:
-            _processed_events.add(event_id)
 
         event = payload.get("event", {})
-        if event.get("type") == "team_join":
-            user = event.get("user", {})
-            handle_new_member(user.get("id") if isinstance(user, dict) else user)
+        logger.info(
+            "event_received id=%s type=%s channel=%s",
+            event_id, event.get("type"), event.get("channel"),
+        )
+
+        # Hand off to a background worker. Anything slow (AI, DMs) happens
+        # there, so we never hold Slack's 3-second window open.
+        handlers.dispatch(slack_client, event)
 
     # Always 200 quickly so Slack doesn't retry.
     return jsonify(ok=True)

@@ -20,3 +20,6 @@ build/
 credentials.json
 secrets.json
 serviceAccountKey.json
+# Never commit real credentials, including backups/variants of .env
+.env.*
+!.env.example
