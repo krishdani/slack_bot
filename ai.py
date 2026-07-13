@@ -279,3 +279,93 @@ def moderate_message(text, channel_name, author_name, rules):
         return None
 
     return _validate(raw, channel_name)
+
+
+# --------------------------------------------------------------------------- #
+# Reply suggestions
+# --------------------------------------------------------------------------- #
+
+_REPLY_SYSTEM = (
+    "You draft replies for a product-community manager on Slack. You are given "
+    "one message, the name of the channel it was posted in, and what that "
+    "channel is for. Draft a single reply the manager could send in that "
+    "channel.\n"
+    "\n"
+    "The manager reviews every draft and decides whether to send it — you never "
+    "post anything yourself.\n"
+    "\n"
+    "Guidance:\n"
+    "- Be warm, concise and genuinely helpful. Sound like a real person, not a "
+    "form letter. One short paragraph is usually enough.\n"
+    "- Address the author by first name when it reads naturally.\n"
+    "- If it's a question, actually try to answer or point them in the right "
+    "direction. If it's a statement or greeting, a brief acknowledgement is "
+    "fine.\n"
+    "- Never invent facts, links, dates, prices or commitments. If you don't "
+    "know something, say the manager will follow up rather than guessing.\n"
+    "- No @-mentions, no channel links, no markdown headings — just the message "
+    "text the manager would type.\n"
+    "\n"
+    'Return STRICT JSON only, exactly this key: {"suggested_reply": string}'
+)
+
+
+def suggest_reply(text, channel_name, author_name, rules=None):
+    """Draft a reply the handler could send to one channel message.
+
+    Args:
+        text: The raw message text.
+        channel_name: Channel name without '#'.
+        author_name: Display name, so the draft can greet them.
+        rules: The channel's entry from ``channel_rules`` (for context), or None.
+
+    Returns:
+        A non-empty draft string, or None when AI is disabled, the message is
+        empty, or every attempt failed. A None return means "no suggestion" —
+        the caller skips the DM rather than sending an empty one.
+    """
+    if not AI_ENABLED or not (text or "").strip():
+        return None
+
+    user_content = json.dumps(
+        {
+            "channel": channel_name,
+            "channel_purpose": (rules or {}).get("purpose"),
+            "author_display_name": author_name,
+            "message": text[:MODERATION_MAX_CHARS],
+        }
+    )
+
+    def _call():
+        resp = _get_client().chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.3,  # a little warmth; replies shouldn't read robotic
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _REPLY_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        return json.loads(resp.choices[0].message.content)
+
+    try:
+        raw = with_retry(
+            _call,
+            attempts=config.AI_MAX_RETRIES + 1,
+            retriable=_retriable_openai,
+            label="openai.suggest_reply",
+        )
+    except Exception as e:  # noqa: BLE001 — any failure means "no suggestion"
+        logger.error(
+            "reply_ai_failed channel=%s error=%s (no suggestion sent)",
+            channel_name, e,
+        )
+        return None
+
+    if not isinstance(raw, dict):
+        logger.error("reply_ai_bad_shape channel=%s payload=%r", channel_name, raw)
+        return None
+
+    reply = raw.get("suggested_reply")
+    reply = str(reply).strip() if reply else ""
+    return reply or None

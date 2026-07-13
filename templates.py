@@ -123,6 +123,51 @@ def moderation_alert(
     return "\n".join(lines)
 
 
+def reply_suggestion(
+    channel_name,
+    author_name,
+    author_id,
+    timestamp,
+    text,
+    suggested_reply,
+    permalink=None,
+):
+    """Body of the '💬 Suggested Reply' DM.
+
+    Surfaces a new channel message plus a draft the handler could send. This is
+    independent of moderation — it says nothing about whether the message
+    belongs in the channel, only offers a reply the handler may choose to use.
+    """
+    author = f"<@{author_id}>" if author_id else f"*{author_name}*"
+
+    lines = [
+        "*Channel:*",
+        f"#{channel_name}",
+        "",
+        "*Posted By:*",
+        f"{author_name} ({author})",
+        "",
+        "*Timestamp:*",
+        format_timestamp(timestamp),
+        "",
+        "*Message:*",
+        f"> {text}",
+        "",
+        "*Suggested Reply:*",
+        "",
+        suggested_reply or "No suggestion available.",
+    ]
+
+    if permalink:
+        lines += ["", f"<{permalink}|View message in Slack>"]
+
+    lines += [
+        "",
+        "_A suggestion only — nothing was posted. Send it, edit it, or ignore it._",
+    ]
+    return "\n".join(lines)
+
+
 def fallback_reply(author_name, channel_name, suggested_channel):
     """A friendly copy-paste reply for the keyword fallback (no AI available)."""
     first_name = (author_name or "there").split()[0]

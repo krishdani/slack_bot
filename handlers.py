@@ -12,7 +12,9 @@ import logging
 import re
 import time
 
+import ai
 import background
+import channel_rules
 import config
 import moderation
 import notify
@@ -196,6 +198,108 @@ def process_message_event(client, event):
 
 
 # --------------------------------------------------------------------------- #
+# Reply suggestions — DM the handler a draft reply for a channel message
+# --------------------------------------------------------------------------- #
+
+
+def _reply_skip_reason(client, event):
+    """Return why this message shouldn't get a reply suggestion, or None.
+
+    Deliberately lighter than ``_skip_reason``: by default it only drops things
+    a human could never reply to (bot posts, edits/joins, DMs, the bot's own
+    messages). Noise/length/thread filtering is opt-in via config, so the
+    default is 'draft for every real message'.
+    """
+    if not config.REPLY_SUGGESTIONS_ENABLED:
+        return "reply_suggestions_disabled"
+
+    if event.get("subtype") or event.get("bot_id"):
+        return "not_a_user_message"
+
+    if event.get("channel_type") not in _MODERATED_CHANNEL_TYPES:
+        return "not_a_channel"
+
+    text = (event.get("text") or "").strip()
+    if not text:
+        return "empty"  # nothing to reply to
+    if len(text) < config.REPLY_SUGGESTIONS_MIN_CHARS:
+        return "too_short"
+
+    thread_ts = event.get("thread_ts")
+    if (
+        thread_ts
+        and thread_ts != event.get("ts")
+        and not config.REPLY_SUGGESTIONS_INCLUDE_THREADS
+    ):
+        return "thread_reply"
+
+    user_id = event.get("user")
+    if not user_id:
+        return "no_author"
+    if user_id == notify.bot_user_id(client):
+        return "own_message"
+
+    return None
+
+
+def process_reply_suggestion(client, event):
+    """Draft a reply for one channel message and DM it to the handler.
+
+    Runs independently of moderation. If the AI can't produce a suggestion
+    (disabled or failed), nothing is sent — an empty draft has no value.
+    """
+    started = time.perf_counter()
+
+    skip = _reply_skip_reason(client, event)
+    if skip:
+        logger.debug("reply_suggestion_skipped reason=%s", skip)
+        return
+
+    channel_id = event.get("channel")
+    user_id = event.get("user")
+    text = (event.get("text") or "").strip()
+    ts = event.get("ts")
+
+    channel_name = notify.channel_name_of(client, channel_id)
+    author_name = notify.display_name_of(client, user_id)
+
+    rules = channel_rules.rules_for(channel_name)
+    draft = ai.suggest_reply(text, channel_name, author_name, rules)
+    if not draft:
+        logger.info(
+            "reply_suggestion_none channel=%s user=%s (AI disabled or failed)",
+            channel_name, user_id,
+        )
+        return
+
+    try:
+        notify.notify_handler(
+            title="💬 Suggested Reply",
+            message=templates.reply_suggestion(
+                channel_name=channel_name,
+                author_name=author_name,
+                author_id=user_id,
+                timestamp=ts,
+                text=text,
+                suggested_reply=draft,
+                permalink=notify.permalink(client, channel_id, ts),
+            ),
+            priority="normal",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting must not crash the worker
+        logger.exception(
+            "reply_suggestion_failed channel=%s user=%s error=%s",
+            channel_name, user_id, exc,
+        )
+
+    logger.info(
+        "reply_suggestion_sent channel=%s author=%s duration_ms=%d",
+        channel_name, user_id, (time.perf_counter() - started) * 1000,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Dispatch
 # --------------------------------------------------------------------------- #
 
@@ -203,7 +307,7 @@ def process_message_event(client, event):
 def dispatch(client, event):
     """Route a Slack event to its handler, off the request thread.
 
-    Unknown event types are ignored. Returns the name of the handler that was
+    Unknown event types are ignored. Returns the name(s) of the handler(s)
     queued (useful for logging/tests), or None.
     """
     event_type = event.get("type")
@@ -215,7 +319,11 @@ def dispatch(client, event):
         return "process_team_join"
 
     if event_type == "message":
+        # Two independent paths run for every message: moderation (is this in
+        # the right channel?) and reply suggestion (draft a reply). Either,
+        # both, or neither may DM the handler.
         background.submit(process_message_event, client, event)
-        return "process_message_event"
+        background.submit(process_reply_suggestion, client, event)
+        return "process_message_event,process_reply_suggestion"
 
     return None

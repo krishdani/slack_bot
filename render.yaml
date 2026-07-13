@@ -40,6 +40,13 @@ services:
         value: "off"
       - key: MODERATE_THREAD_REPLIES
         value: "off"
+      # --- Reply suggestions --- (WARNING: 'on' DMs a draft for EVERY message)
+      - key: REPLY_SUGGESTIONS_ENABLED
+        value: "on"
+      - key: REPLY_SUGGESTIONS_MIN_CHARS
+        value: "15"
+      - key: REPLY_SUGGESTIONS_INCLUDE_THREADS
+        value: "on"
       # Off-request workers for AI + DM work, so Slack always gets a fast ack.
       # Keep gunicorn single-worker (default) so these threads are shared.
       - key: BACKGROUND_WORKERS

@@ -139,6 +139,79 @@ class ModerationFlowTests(unittest.TestCase):
         ), patch("notify.member_profile_data", side_effect=RuntimeError("boom")), patch("notify.display_name_of", side_effect=RuntimeError("boom")), patch("notify.workspace_name", return_value="Example"), patch("notify.notify_handler", side_effect=RuntimeError("boom")):
             handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
 
+    # --- Reply suggestions --------------------------------------------------
+
+    def test_reply_suggestion_dms_handler_with_draft(self):
+        client = object()
+        with patch("notify.bot_user_id", return_value=None), patch(
+            "notify.channel_name_of", return_value="product-discussions"
+        ), patch("notify.display_name_of", return_value="Ada"), patch(
+            "notify.permalink", return_value="https://example.slack.com/"
+        ), patch("channel_rules.rules_for", return_value={"purpose": "PM talk"}), patch(
+            "ai.suggest_reply", return_value="Hi Ada, great question — here's a pointer."
+        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+            handlers.process_reply_suggestion(
+                client,
+                {"channel": "C1", "channel_type": "channel", "text": "How do I run an experiment?", "user": "U1", "ts": "1712345678.000200"},
+            )
+
+        notify_handler.assert_called_once()
+        self.assertEqual(notify_handler.call_args.kwargs["title"], "💬 Suggested Reply")
+
+    def test_reply_suggestion_skips_bot_message(self):
+        client = object()
+        with patch("ai.suggest_reply") as suggest, patch("notify.notify_handler") as notify_handler:
+            handlers.process_reply_suggestion(
+                client,
+                {"channel": "C1", "channel_type": "channel", "text": "hello there", "user": "U1", "bot_id": "B1"},
+            )
+
+        suggest.assert_not_called()
+        notify_handler.assert_not_called()
+
+    def test_reply_suggestion_no_dm_when_ai_returns_none(self):
+        client = object()
+        with patch("notify.bot_user_id", return_value=None), patch(
+            "notify.channel_name_of", return_value="product-discussions"
+        ), patch("notify.display_name_of", return_value="Ada"), patch(
+            "channel_rules.rules_for", return_value=None
+        ), patch("ai.suggest_reply", return_value=None), patch(
+            "notify.notify_handler"
+        ) as notify_handler:
+            handlers.process_reply_suggestion(
+                client,
+                {"channel": "C1", "channel_type": "channel", "text": "How do I run an experiment?", "user": "U1", "ts": "1712345678.000200"},
+            )
+
+        notify_handler.assert_not_called()
+
+    def test_reply_suggestion_disabled_skips_everything(self):
+        client = object()
+        with patch("config.REPLY_SUGGESTIONS_ENABLED", False), patch(
+            "ai.suggest_reply"
+        ) as suggest, patch("notify.notify_handler") as notify_handler:
+            handlers.process_reply_suggestion(
+                client,
+                {"channel": "C1", "channel_type": "channel", "text": "How do I run an experiment?", "user": "U1", "ts": "1712345678.000200"},
+            )
+
+        suggest.assert_not_called()
+        notify_handler.assert_not_called()
+
+    def test_reply_suggestion_template_shows_draft_and_disclaimer(self):
+        text = templates.reply_suggestion(
+            channel_name="product-discussions",
+            author_name="Ada",
+            author_id="U1",
+            timestamp="1712345678.000200",
+            text="How do I run an experiment?",
+            suggested_reply="Hi Ada, here's how.",
+            permalink="https://example.slack.com/",
+        )
+        self.assertIn("Suggested Reply", text)
+        self.assertIn("Hi Ada, here's how.", text)
+        self.assertIn("nothing was posted", text)
+
 
 if __name__ == "__main__":
     unittest.main()

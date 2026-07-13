@@ -101,6 +101,32 @@ AI_MAX_RETRIES = _int("AI_MAX_RETRIES", 2)
 
 
 # --------------------------------------------------------------------------- #
+# Reply suggestions (new feature)
+# --------------------------------------------------------------------------- #
+# For every channel message, draft a reply the handler could send and DM it to
+# them. This is INDEPENDENT of moderation: a message can produce a moderation
+# alert, a reply suggestion, both, or neither. Off-topic messages already carry
+# a suggested reply inside their moderation alert; this surfaces one for the
+# on-topic messages too.
+#
+# WARNING: with the defaults below this fires on *every* message, which in an
+# active workspace is a lot of DMs and a lot of OpenAI calls. Raise
+# REPLY_SUGGESTIONS_MIN_CHARS, turn REPLY_SUGGESTIONS_INCLUDE_THREADS off, or
+# set REPLY_SUGGESTIONS_ENABLED=off to dial it back — no redeploy of logic
+# needed, just the env var.
+
+REPLY_SUGGESTIONS_ENABLED = _bool("REPLY_SUGGESTIONS_ENABLED", True)
+
+# Skip messages shorter than this before drafting a reply. 0 = no minimum
+# (draft for everything, including "thanks" and one-word posts); 15 skips short
+# noise. The env var (see render.yaml) overrides this default.
+REPLY_SUGGESTIONS_MIN_CHARS = _int("REPLY_SUGGESTIONS_MIN_CHARS", 15)
+
+# Draft replies for thread replies too, not just top-level messages.
+REPLY_SUGGESTIONS_INCLUDE_THREADS = _bool("REPLY_SUGGESTIONS_INCLUDE_THREADS", True)
+
+
+# --------------------------------------------------------------------------- #
 # Background processing
 # --------------------------------------------------------------------------- #
 
