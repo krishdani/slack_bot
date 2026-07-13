@@ -31,7 +31,11 @@ HANDLER_USER_ID = config.HANDLER_SLACK_USER
 _user_cache = {}
 _channel_cache = {}
 _workspace_name = None
-_bot_user_id = None
+# Bot identity is per-token: in two-bot mode the message bot and join bot have
+# different user ids, so this is keyed by client (token) rather than a single
+# global. The user/channel/workspace caches above are workspace data, identical
+# for both bots, so they stay shared.
+_bot_user_ids = {}
 
 # Prefixes that let the handler triage a DM at a glance.
 _PRIORITY_PREFIX = {"normal": "", "high": "", "urgent": "🚨 "}
@@ -156,14 +160,18 @@ def channel_name_of(client, channel_id):
 
 
 def bot_user_id(client):
-    """Return (and cache) the bot's own Slack user id, or None if unavailable."""
-    global _bot_user_id
-    if _bot_user_id is None:
+    """Return (and cache) this client's own bot user id, or None if unavailable.
+
+    Cached per token so the message bot and join bot never share an identity.
+    """
+    key = getattr(client, "token", None) or id(client)
+    if key not in _bot_user_ids:
         try:
-            _bot_user_id = client.auth_test().get("user_id")
+            _bot_user_ids[key] = client.auth_test().get("user_id")
         except SlackApiError as e:
             logger.error("auth.test failed: %s", e.response.get("error"))
-    return _bot_user_id
+            return None  # don't cache a failure — retry next time
+    return _bot_user_ids[key]
 
 
 def workspace_name(client):

@@ -304,13 +304,26 @@ def process_reply_suggestion(client, event):
 # --------------------------------------------------------------------------- #
 
 
-def dispatch(client, event):
+def dispatch(client, event, only=None):
     """Route a Slack event to its handler, off the request thread.
+
+    Args:
+        client: The Slack client to hand the handler — in two-bot mode each
+            route passes its own bot's client, so DMs come from the right bot.
+        event: The Slack event payload.
+        only: Optional set of event types this route is allowed to handle.
+            Events outside it are ignored — defence in depth so a mis-subscribed
+            app can't make the wrong bot act (e.g. the message bot handling a
+            join). None means handle everything this function knows about.
 
     Unknown event types are ignored. Returns the name(s) of the handler(s)
     queued (useful for logging/tests), or None.
     """
     event_type = event.get("type")
+
+    if only is not None and event_type not in only:
+        logger.debug("dispatch_ignored type=%s not in %s", event_type, only)
+        return None
 
     if event_type == "team_join":
         user = event.get("user")

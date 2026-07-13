@@ -213,5 +213,55 @@ class ModerationFlowTests(unittest.TestCase):
         self.assertIn("nothing was posted", text)
 
 
+    # --- Two-bot split (join bot vs message bot) ----------------------------
+
+    def test_dispatch_only_filter_blocks_wrong_event_type(self):
+        # Message route (only={'message'}) must ignore a join event.
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(), {"type": "team_join", "user": "U1"}, only={"message"}
+            )
+        self.assertIsNone(result)
+        submit.assert_not_called()
+
+    def test_dispatch_only_filter_allows_matching_event(self):
+        # Join route (only={'team_join'}) handles a join event.
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(), {"type": "team_join", "user": "U1"}, only={"team_join"}
+            )
+        self.assertEqual(result, "process_team_join")
+        submit.assert_called_once()
+
+    def test_dispatch_message_route_queues_both_message_handlers(self):
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(),
+                {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
+                only={"message"},
+            )
+        self.assertEqual(result, "process_message_event,process_reply_suggestion")
+        self.assertEqual(submit.call_count, 2)
+
+    def test_bot_user_id_is_cached_per_client(self):
+        import notify
+
+        class FakeClient:
+            def __init__(self, token, uid):
+                self.token = token
+                self._uid = uid
+
+            def auth_test(self):
+                return {"user_id": self._uid}
+
+        notify._bot_user_ids.clear()
+        msg_bot = FakeClient("xoxb-message", "U_MSG")
+        join_bot = FakeClient("xoxb-join", "U_JOIN")
+        # Two different bots must resolve to two different ids, not share one.
+        self.assertEqual(notify.bot_user_id(msg_bot), "U_MSG")
+        self.assertEqual(notify.bot_user_id(join_bot), "U_JOIN")
+        self.assertEqual(notify.bot_user_id(msg_bot), "U_MSG")
+
+
 if __name__ == "__main__":
     unittest.main()

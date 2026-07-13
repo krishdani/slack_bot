@@ -51,6 +51,15 @@ def _float(name, default):
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 
+# --- Optional second bot (join alerts as a separate Slack app) --------------
+# Two sidebar bots require two Slack apps with two DIFFERENT tokens. When
+# JOIN_SLACK_BOT_TOKEN is set we run in "two-bot mode": this primary app becomes
+# the MESSAGE bot (moderation + reply suggestions) and a second JOIN bot handles
+# new-member alerts on its own route (/slack/join-events) with its own token and
+# signing secret. Leave it unset to keep the single-bot behaviour unchanged.
+JOIN_SLACK_BOT_TOKEN = os.environ.get("JOIN_SLACK_BOT_TOKEN")
+TWO_BOT_MODE = bool(JOIN_SLACK_BOT_TOKEN)
+
 # The community handler (POC) who receives every DM the bot sends.
 # HANDLER_SLACK_USER is the new name; HUMAN_POC_USER_ID is the name this project
 # already used. They identify the same person, so we accept either and prefer
@@ -137,9 +146,19 @@ BACKGROUND_WORKERS = _int("BACKGROUND_WORKERS", 4)
 
 @lru_cache(maxsize=1)
 def get_slack_client():
-    """Return the process-wide Slack client.
+    """Return the process-wide Slack client (the primary / message bot).
 
     ``WebClient`` is a stateless HTTP wrapper, so it is safe to share across the
     Flask request threads and the background workers.
     """
     return WebClient(token=SLACK_BOT_TOKEN)
+
+
+@lru_cache(maxsize=1)
+def get_join_slack_client():
+    """Return the process-wide Slack client for the JOIN bot.
+
+    Only meaningful in two-bot mode (``TWO_BOT_MODE``); callers guard on that
+    before using it, so this is never built with a ``None`` token in practice.
+    """
+    return WebClient(token=JOIN_SLACK_BOT_TOKEN)

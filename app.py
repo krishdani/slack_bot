@@ -47,6 +47,9 @@ logger = logging.getLogger("tpf-community-bot")
 
 SLACK_BOT_TOKEN = config.SLACK_BOT_TOKEN
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+# Signing secret for the optional JOIN bot (two-bot mode). Its own app => its
+# own secret; it must not reuse the primary bot's.
+JOIN_SLACK_SIGNING_SECRET = os.environ.get("JOIN_SLACK_SIGNING_SECRET")
 DIGEST_TRIGGER_TOKEN = os.environ.get("DIGEST_TRIGGER_TOKEN")
 # The daily report covers this many hours of history (default 24).
 DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "24"))
@@ -62,6 +65,20 @@ if not config.HANDLER_SLACK_USER:
     )
 
 slack_client = config.get_slack_client()
+
+# Two-bot mode: a separate JOIN bot (its own Slack app/token) handles new-member
+# alerts on /slack/join-events, while this primary app handles messages only.
+if config.TWO_BOT_MODE:
+    join_slack_client = config.get_join_slack_client()
+    if not JOIN_SLACK_SIGNING_SECRET:
+        logger.warning(
+            "JOIN_SLACK_BOT_TOKEN is set but JOIN_SLACK_SIGNING_SECRET is not — "
+            "the join bot's requests will fail verification."
+        )
+    logger.info("Two-bot mode ON: join alerts served on /slack/join-events.")
+else:
+    join_slack_client = None
+    logger.info("Single-bot mode: /slack/events handles joins and messages.")
 
 app = Flask(__name__)
 
@@ -100,8 +117,14 @@ def health():
     return jsonify(status="ok", service="tpf-community-bot")
 
 
-@app.route("/slack/events", methods=["POST"])
-def slack_events():
+def _handle_slack_events(signing_secret, client, only):
+    """Shared handler for a Slack Events endpoint.
+
+    One code path serves both bots; the caller passes the signing secret and
+    client for its own app, plus ``only`` — the set of event types that app is
+    allowed to act on. Verifies the signature, dedupes retries, and dispatches
+    to a background worker so Slack always gets a fast 200.
+    """
     # Raw body is required for signature verification — read it before parsing.
     raw_body = request.get_data()
     payload = request.get_json(silent=True) or {}
@@ -115,7 +138,7 @@ def slack_events():
 
     # 2. All other requests must carry a valid Slack signature.
     if not is_valid_slack_request(
-        signing_secret=SLACK_SIGNING_SECRET,
+        signing_secret=signing_secret,
         request_body=raw_body,
         timestamp=request.headers.get("X-Slack-Request-Timestamp", ""),
         signature=request.headers.get("X-Slack-Signature", ""),
@@ -138,10 +161,29 @@ def slack_events():
 
         # Hand off to a background worker. Anything slow (AI, DMs) happens
         # there, so we never hold Slack's 3-second window open.
-        handlers.dispatch(slack_client, event)
+        handlers.dispatch(client, event, only=only)
 
     # Always 200 quickly so Slack doesn't retry.
     return jsonify(ok=True)
+
+
+@app.route("/slack/events", methods=["POST"])
+def slack_events():
+    # In two-bot mode this is the MESSAGE bot: joins are the join bot's job, so
+    # restrict this route to message events. In single-bot mode it handles
+    # everything, exactly as before.
+    only = {"message"} if config.TWO_BOT_MODE else None
+    return _handle_slack_events(SLACK_SIGNING_SECRET, slack_client, only)
+
+
+@app.route("/slack/join-events", methods=["POST"])
+def slack_join_events():
+    """Events endpoint for the optional JOIN bot (its own Slack app)."""
+    if not config.TWO_BOT_MODE:
+        return jsonify(error="join bot not configured"), 503
+    return _handle_slack_events(
+        JOIN_SLACK_SIGNING_SECRET, join_slack_client, {"team_join"}
+    )
 
 
 def _authorized(req):
