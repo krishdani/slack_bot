@@ -304,39 +304,52 @@ def process_reply_suggestion(client, event):
 # --------------------------------------------------------------------------- #
 
 
-def dispatch(client, event, only=None):
-    """Route a Slack event to its handler, off the request thread.
+# Capabilities a route may be limited to. In two-bot mode the original bot runs
+# JOIN + MODERATION and the new reply bot runs REPLY; in single-bot mode a route
+# passes capabilities=None and does everything.
+CAP_JOIN = "join"            # new-member alerts (team_join)
+CAP_MODERATION = "moderation"  # channel moderation alerts (message)
+CAP_REPLY = "reply"          # AI reply suggestions (message)
+
+
+def dispatch(client, event, capabilities=None):
+    """Route a Slack event to its handler(s), off the request thread.
 
     Args:
         client: The Slack client to hand the handler — in two-bot mode each
             route passes its own bot's client, so DMs come from the right bot.
         event: The Slack event payload.
-        only: Optional set of event types this route is allowed to handle.
-            Events outside it are ignored — defence in depth so a mis-subscribed
-            app can't make the wrong bot act (e.g. the message bot handling a
-            join). None means handle everything this function knows about.
+        capabilities: Optional set restricting what this route does — any of
+            ``CAP_JOIN`` / ``CAP_MODERATION`` / ``CAP_REPLY``. A message can thus
+            drive moderation on one bot and reply-drafting on another. None means
+            do everything (single-bot mode).
 
     Unknown event types are ignored. Returns the name(s) of the handler(s)
     queued (useful for logging/tests), or None.
     """
     event_type = event.get("type")
 
-    if only is not None and event_type not in only:
-        logger.debug("dispatch_ignored type=%s not in %s", event_type, only)
-        return None
+    def allowed(cap):
+        return capabilities is None or cap in capabilities
 
     if event_type == "team_join":
+        if not allowed(CAP_JOIN):
+            return None
         user = event.get("user")
         user_id = user.get("id") if isinstance(user, dict) else user
         background.submit(process_team_join, client, user_id, event.get("event_ts"))
         return "process_team_join"
 
     if event_type == "message":
-        # Two independent paths run for every message: moderation (is this in
-        # the right channel?) and reply suggestion (draft a reply). Either,
-        # both, or neither may DM the handler.
-        background.submit(process_message_event, client, event)
-        background.submit(process_reply_suggestion, client, event)
-        return "process_message_event,process_reply_suggestion"
+        # Moderation and reply-suggestion are independent. In two-bot mode they
+        # live on different bots; in single-bot mode both run here.
+        queued = []
+        if allowed(CAP_MODERATION):
+            background.submit(process_message_event, client, event)
+            queued.append("process_message_event")
+        if allowed(CAP_REPLY):
+            background.submit(process_reply_suggestion, client, event)
+            queued.append("process_reply_suggestion")
+        return ",".join(queued) if queued else None
 
     return None

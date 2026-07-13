@@ -51,14 +51,15 @@ def _float(name, default):
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 
-# --- Optional second bot (join alerts as a separate Slack app) --------------
+# --- Optional second bot (reply suggestions as a separate Slack app) --------
 # Two sidebar bots require two Slack apps with two DIFFERENT tokens. When
-# JOIN_SLACK_BOT_TOKEN is set we run in "two-bot mode": this primary app becomes
-# the MESSAGE bot (moderation + reply suggestions) and a second JOIN bot handles
-# new-member alerts on its own route (/slack/join-events) with its own token and
-# signing secret. Leave it unset to keep the single-bot behaviour unchanged.
-JOIN_SLACK_BOT_TOKEN = os.environ.get("JOIN_SLACK_BOT_TOKEN")
-TWO_BOT_MODE = bool(JOIN_SLACK_BOT_TOKEN)
+# REPLY_SLACK_BOT_TOKEN is set we run in "two-bot mode": this primary app keeps
+# doing everything it did before (new-member alerts + channel moderation + the
+# daily report), and a second REPLY bot handles the AI reply-suggestion feature
+# on its own route (/slack/reply-events) with its own token and signing secret.
+# Leave it unset to keep the single-bot behaviour unchanged.
+REPLY_SLACK_BOT_TOKEN = os.environ.get("REPLY_SLACK_BOT_TOKEN")
+TWO_BOT_MODE = bool(REPLY_SLACK_BOT_TOKEN)
 
 # The community handler (POC) who receives every DM the bot sends.
 # HANDLER_SLACK_USER is the new name; HUMAN_POC_USER_ID is the name this project
@@ -155,10 +156,10 @@ def get_slack_client():
 
 
 @lru_cache(maxsize=1)
-def get_join_slack_client():
-    """Return the process-wide Slack client for the JOIN bot.
+def get_reply_slack_client():
+    """Return the process-wide Slack client for the REPLY bot.
 
     Only meaningful in two-bot mode (``TWO_BOT_MODE``); callers guard on that
     before using it, so this is never built with a ``None`` token in practice.
     """
-    return WebClient(token=JOIN_SLACK_BOT_TOKEN)
+    return WebClient(token=REPLY_SLACK_BOT_TOKEN)

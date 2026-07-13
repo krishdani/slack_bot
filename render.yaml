@@ -12,12 +12,12 @@ services:
         sync: false
       - key: SLACK_SIGNING_SECRET
         sync: false
-      # --- Optional second (JOIN) bot: separate Slack app, its own token +
-      # secret. Set both to split new-member alerts onto /slack/join-events.
-      # Leave unset to keep everything on the single primary bot.
-      - key: JOIN_SLACK_BOT_TOKEN
+      # --- Optional second (REPLY) bot: separate Slack app, its own token +
+      # secret. Set both to split the AI reply-suggestion feature onto
+      # /slack/reply-events. Leave unset to keep everything on the primary bot.
+      - key: REPLY_SLACK_BOT_TOKEN
         sync: false
-      - key: JOIN_SLACK_SIGNING_SECRET
+      - key: REPLY_SLACK_SIGNING_SECRET
         sync: false
       # Slack user ID of the community handler: receives the daily report and
       # every real-time alert. HUMAN_POC_USER_ID is accepted as a fallback.

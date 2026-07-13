@@ -213,32 +213,50 @@ class ModerationFlowTests(unittest.TestCase):
         self.assertIn("nothing was posted", text)
 
 
-    # --- Two-bot split (join bot vs message bot) ----------------------------
+    # --- Two-bot split (original bot vs reply bot) --------------------------
 
-    def test_dispatch_only_filter_blocks_wrong_event_type(self):
-        # Message route (only={'message'}) must ignore a join event.
+    def test_primary_bot_runs_join_and_moderation_not_reply(self):
+        caps = {handlers.CAP_JOIN, handlers.CAP_MODERATION}
+        # A join event: handled.
         with patch("background.submit") as submit:
-            result = handlers.dispatch(
-                object(), {"type": "team_join", "user": "U1"}, only={"message"}
+            self.assertEqual(
+                handlers.dispatch(object(), {"type": "team_join", "user": "U1"}, caps),
+                "process_team_join",
             )
-        self.assertIsNone(result)
-        submit.assert_not_called()
-
-    def test_dispatch_only_filter_allows_matching_event(self):
-        # Join route (only={'team_join'}) handles a join event.
-        with patch("background.submit") as submit:
-            result = handlers.dispatch(
-                object(), {"type": "team_join", "user": "U1"}, only={"team_join"}
-            )
-        self.assertEqual(result, "process_team_join")
-        submit.assert_called_once()
-
-    def test_dispatch_message_route_queues_both_message_handlers(self):
+            submit.assert_called_once()
+        # A message: moderation runs, reply-suggestion does NOT.
         with patch("background.submit") as submit:
             result = handlers.dispatch(
                 object(),
                 {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
-                only={"message"},
+                caps,
+            )
+        self.assertEqual(result, "process_message_event")
+        submit.assert_called_once()
+
+    def test_reply_bot_runs_only_reply_suggestion(self):
+        caps = {handlers.CAP_REPLY}
+        # A message: only reply-suggestion runs, moderation does NOT.
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(),
+                {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
+                caps,
+            )
+        self.assertEqual(result, "process_reply_suggestion")
+        submit.assert_called_once()
+        # A join event on the reply bot: ignored.
+        with patch("background.submit") as submit:
+            self.assertIsNone(
+                handlers.dispatch(object(), {"type": "team_join", "user": "U1"}, caps)
+            )
+            submit.assert_not_called()
+
+    def test_single_bot_mode_runs_everything(self):
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(),
+                {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
             )
         self.assertEqual(result, "process_message_event,process_reply_suggestion")
         self.assertEqual(submit.call_count, 2)
