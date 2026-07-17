@@ -19,6 +19,14 @@ services:
         sync: false
       - key: REPLY_SLACK_SIGNING_SECRET
         sync: false
+      # --- Optional third (RELAY) bot: separate Slack app, its own token +
+      # secret. Set both to serve the "DM me every message" relay from its own
+      # bot on /slack/relay-events. Setting the token also switches the relay
+      # feature on by default.
+      - key: RELAY_SLACK_BOT_TOKEN
+        sync: false
+      - key: RELAY_SLACK_SIGNING_SECRET
+        sync: false
       # Slack user ID of the community handler: receives the daily report and
       # every real-time alert. HUMAN_POC_USER_ID is accepted as a fallback.
       - key: HANDLER_SLACK_USER
@@ -54,6 +62,15 @@ services:
         value: "15"
       - key: REPLY_SUGGESTIONS_INCLUDE_THREADS
         value: "on"
+      # --- Message relay --- (DMs the handler a COPY of every message; no AI)
+      - key: MESSAGE_RELAY_ENABLED
+        value: "on"
+      - key: MESSAGE_RELAY_MIN_CHARS
+        value: "0"
+      - key: MESSAGE_RELAY_INCLUDE_THREADS
+        value: "on"
+      - key: MESSAGE_RELAY_INCLUDE_BOTS
+        value: "off"
       # Off-request workers for AI + DM work, so Slack always gets a fast ack.
       # Keep gunicorn single-worker (default) so these threads are shared.
       - key: BACKGROUND_WORKERS

@@ -213,6 +213,181 @@ class ModerationFlowTests(unittest.TestCase):
         self.assertIn("nothing was posted", text)
 
 
+    # --- Message relay ------------------------------------------------------
+
+    def _relay_event(self, **overrides):
+        event = {
+            "channel": "C1",
+            "channel_type": "channel",
+            "text": "Has anyone used Amplitude for retention analysis?",
+            "user": "U1",
+            "ts": "1712345678.000200",
+        }
+        event.update(overrides)
+        return event
+
+    def _relay_patches(self):
+        """The Slack lookups process_message_relay makes, all stubbed."""
+        return (
+            patch("notify.bot_user_id", return_value=None),
+            patch("notify.channel_name_of", return_value="product-analytics-101"),
+            patch("notify.display_name_of", return_value="Ada"),
+            patch("notify.permalink", return_value="https://example.slack.com/"),
+        )
+
+    def test_message_relay_dms_handler_for_an_ordinary_message(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event())
+
+        notify_handler.assert_called_once()
+        self.assertEqual(notify_handler.call_args.kwargs["title"], "📨 New Message")
+        body = notify_handler.call_args.kwargs["message"]
+        self.assertIn("#product-analytics-101", body)
+        self.assertIn("<@U1>", body)
+        self.assertIn("Amplitude", body)
+
+    def test_message_relay_sends_for_noise_the_other_features_skip(self):
+        # "thanks" is dropped by moderation and reply suggestions. The relay's
+        # whole purpose is that it isn't — every message means every message.
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("config.MESSAGE_RELAY_MIN_CHARS", 0), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event(text="thanks"))
+
+        notify_handler.assert_called_once()
+
+    def test_message_relay_uses_no_ai(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("notify.notify_handler", return_value=True), patch(
+            "ai.suggest_reply"
+        ) as suggest, patch("moderation.evaluate") as evaluate:
+            handlers.process_message_relay(client, self._relay_event())
+
+        suggest.assert_not_called()
+        evaluate.assert_not_called()
+
+    def test_message_relay_marks_thread_replies(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("config.MESSAGE_RELAY_INCLUDE_THREADS", True), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
+            handlers.process_message_relay(
+                client, self._relay_event(thread_ts="1712345600.000100")
+            )
+
+        self.assertIn("thread reply", notify_handler.call_args.kwargs["message"])
+
+    def test_message_relay_skips_thread_replies_when_configured_off(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("config.MESSAGE_RELAY_INCLUDE_THREADS", False), patch(
+            "notify.notify_handler"
+        ) as notify_handler:
+            handlers.process_message_relay(
+                client, self._relay_event(thread_ts="1712345600.000100")
+            )
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_skips_bot_posts_by_default(self):
+        client = object()
+        with patch("config.MESSAGE_RELAY_ENABLED", True), patch(
+            "config.MESSAGE_RELAY_INCLUDE_BOTS", False
+        ), patch("notify.notify_handler") as notify_handler:
+            handlers.process_message_relay(client, self._relay_event(bot_id="B1"))
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_skips_edits_and_joins(self):
+        client = object()
+        with patch("config.MESSAGE_RELAY_ENABLED", True), patch(
+            "notify.notify_handler"
+        ) as notify_handler:
+            for subtype in ("message_changed", "message_deleted", "channel_join"):
+                handlers.process_message_relay(
+                    client, self._relay_event(subtype=subtype)
+                )
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_relays_a_file_share(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+            handlers.process_message_relay(
+                client, self._relay_event(subtype="file_share")
+            )
+
+        notify_handler.assert_called_once()
+
+    def test_message_relay_skips_dms_to_the_bot(self):
+        client = object()
+        with patch("config.MESSAGE_RELAY_ENABLED", True), patch(
+            "notify.notify_handler"
+        ) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event(channel_type="im"))
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_skips_the_bots_own_messages(self):
+        client = object()
+        with patch("config.MESSAGE_RELAY_ENABLED", True), patch(
+            "notify.bot_user_id", return_value="U_BOT"
+        ), patch("notify.notify_handler") as notify_handler:
+            handlers.process_message_relay(client, self._relay_event(user="U_BOT"))
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_disabled_skips_everything(self):
+        client = object()
+        with patch("config.MESSAGE_RELAY_ENABLED", False), patch(
+            "notify.notify_handler"
+        ) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event())
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_survives_a_failed_dm(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("notify.notify_handler", side_effect=RuntimeError("boom")):
+            handlers.process_message_relay(client, self._relay_event())  # must not raise
+
+    def test_message_relay_template_has_no_assessment_or_draft(self):
+        text = templates.message_relay(
+            channel_name="product-decks",
+            author_name="Ada",
+            author_id="U1",
+            timestamp="1712345678.000200",
+            text="Sharing my teardown deck.",
+            permalink="https://example.slack.com/",
+        )
+        self.assertIn("#product-decks", text)
+        self.assertIn("Sharing my teardown deck.", text)
+        self.assertIn("View message in Slack", text)
+        self.assertNotIn("Suggested Reply", text)
+        self.assertNotIn("AI Assessment", text)
+
     # --- Two-bot split (original bot vs reply bot) --------------------------
 
     def test_primary_bot_runs_join_and_moderation_not_reply(self):
@@ -252,14 +427,45 @@ class ModerationFlowTests(unittest.TestCase):
             )
             submit.assert_not_called()
 
+    def test_relay_bot_runs_only_the_message_relay(self):
+        caps = {handlers.CAP_RELAY}
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(),
+                {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
+                caps,
+            )
+        self.assertEqual(result, "process_message_relay")
+        submit.assert_called_once()
+        # A join event on the relay bot: ignored.
+        with patch("background.submit") as submit:
+            self.assertIsNone(
+                handlers.dispatch(object(), {"type": "team_join", "user": "U1"}, caps)
+            )
+            submit.assert_not_called()
+
+    def test_primary_bot_does_not_relay_when_the_relay_bot_owns_it(self):
+        caps = {handlers.CAP_JOIN, handlers.CAP_MODERATION, handlers.CAP_REPLY}
+        with patch("background.submit") as submit:
+            result = handlers.dispatch(
+                object(),
+                {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
+                caps,
+            )
+        self.assertNotIn("process_message_relay", result)
+        self.assertEqual(submit.call_count, 2)
+
     def test_single_bot_mode_runs_everything(self):
         with patch("background.submit") as submit:
             result = handlers.dispatch(
                 object(),
                 {"type": "message", "channel": "C1", "text": "hi there", "user": "U1"},
             )
-        self.assertEqual(result, "process_message_event,process_reply_suggestion")
-        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(
+            result,
+            "process_message_event,process_reply_suggestion,process_message_relay",
+        )
+        self.assertEqual(submit.call_count, 3)
 
     def test_bot_user_id_is_cached_per_client(self):
         import notify

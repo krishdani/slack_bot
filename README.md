@@ -6,7 +6,7 @@ designated **community handler** (the Human POC). It never messages members,
 never replies in a public channel, and never moderates on its own — the handler
 decides what to do.
 
-It does three things:
+It does four things:
 
 **1. Daily report** (on demand, `/tasks/daily-report`) — one DM covering the
 last 24h:
@@ -24,6 +24,16 @@ its channel's stated purpose. If it doesn't belong, the handler gets a private
 DM with the original message, the reasoning, a suggested channel, a
 copy-paste-ready reply, and a confidence score. **If it belongs, nothing
 happens at all** — no notification, no reply, no storage.
+
+**4. Message relay** *(optional, `MESSAGE_RELAY_ENABLED`)* — the opposite of
+moderation: **every** message posted in **any** channel is DM'd to the handler
+as-is (who, where, when, the text, a link). No AI, no judgement, no threshold.
+Best run as its own Slack app (see [Message relay bot](#message-relay-bot)) so
+those DMs arrive from their own bot rather than mixed in with the alerts.
+
+> ⚠️ This is high volume by design — one DM per message, workspace-wide. Use
+> `MESSAGE_RELAY_MIN_CHARS` / `MESSAGE_RELAY_INCLUDE_THREADS` to trim it, or
+> `MESSAGE_RELAY_ENABLED=off` to stop it.
 
 > Understanding uses **OpenAI when `OPENAI_API_KEY` is set** (`ai.py`), and falls
 > back to keyword heuristics otherwise (`analysis.py` + the `redirects` in
@@ -59,6 +69,10 @@ happens at all** — no notification, no reply, no storage.
                                                 ▼
                                     ⚠️ DM handler (templates.py)
 
+Message relay (optional, runs alongside the above on every message):
+POST /slack/relay-events → filters: bot? edit/join? DM? → 📨 DM handler
+                            (no AI, no verdict — a copy of the message)
+
 Daily report (unchanged):
 GET/POST /tasks/daily-report → collect.py (live history) → ai.py / analysis.py
         → build_digest + format_daily_report → DM the handler
@@ -67,13 +81,13 @@ GET/POST /tasks/daily-report → collect.py (live history) → ai.py / analysis.
 | File | Role |
 | ---- | ---- |
 | `app.py` | Flask app: verify, dedupe, enqueue, task endpoints. No business logic. |
-| `handlers.py` | What to do with each event (join → alert; message → moderate). |
+| `handlers.py` | What to do with each event (join → alert; message → moderate / suggest / relay). |
 | `background.py` | Thread pool so AI + DM work never blocks the Slack ack. |
 | `moderation.py` | Decides *whether* a message belongs. AI first, heuristics on failure. |
 | `channel_rules.py` | **Channel purposes and rules. The only file you edit to add a channel.** |
 | `ai.py` | OpenAI: batched report classification + real-time moderation prompt. |
 | `notify.py` | `notify_handler(...)`, DM delivery with retry, cached name lookups. |
-| `templates.py` | The DM wording (new-member alert, moderation alert). |
+| `templates.py` | The DM wording (new-member alert, moderation alert, reply suggestion, message relay). |
 | `retry.py` | Shared backoff helper (honours Slack's `Retry-After`). |
 | `config.py` | All env-driven settings + the shared Slack client. |
 | `analysis.py` | Keyword heuristics + daily report builder/formatter. |
@@ -140,6 +154,42 @@ Under **Event Subscriptions**:
 > The bot reads history only for channels it's a member of — run
 > `/tasks/join-public` (below) so it joins them all.
 
+### Message relay bot
+
+The relay ("DM me every message") can run as **its own Slack app**, so its DMs
+arrive from its own bot in the sidebar and the existing TPF Community Bot is
+left exactly as it is. A Slack token can't be shared between two apps, so this
+means a second app with its own token and signing secret.
+
+Set up the new app the same way as above, with these **Bot Token Scopes**:
+
+- `chat:write`, `im:write` — DM the handler
+- `channels:history`, `groups:history` — receive channel messages
+- `channels:read`, `groups:read` — resolve channel names
+- `users:read` — resolve author names
+- `channels:join` — optional, lets it self-join public channels
+
+Under **Event Subscriptions**, point its Request URL at
+`https://<your-app>.onrender.com/slack/relay-events` and subscribe it to
+**`message.channels`** and **`message.groups`** (it does not need `team_join`).
+Invite it to the channels you want relayed — it only sees channels it's in.
+
+Then set both vars on the service:
+
+```bash
+RELAY_SLACK_BOT_TOKEN=xoxb-...        # the NEW app's bot token
+RELAY_SLACK_SIGNING_SECRET=...        # the NEW app's signing secret
+```
+
+Setting `RELAY_SLACK_BOT_TOKEN` does two things: it switches the relay feature on
+by default, and it hands the relay to the new bot so the primary app **doesn't**
+also send it (no duplicate DMs). Leave the token unset and nothing changes for
+the existing bot — the relay stays off unless you set `MESSAGE_RELAY_ENABLED=on`,
+which makes the primary bot send it instead.
+
+The same pattern exists for the AI reply-suggestion feature via
+`REPLY_SLACK_BOT_TOKEN` / `REPLY_SLACK_SIGNING_SECRET` on `/slack/reply-events`.
+
 ---
 
 ## 2. Environment variables
@@ -165,6 +215,12 @@ cp .env.example .env
 | `MODERATION_MIN_CHARS`            | Skip messages shorter than this (default `15`)                     |
 | `MODERATE_UNCONFIGURED_CHANNELS`  | Moderate channels missing from `channel_rules.py` (default `off`)  |
 | `MODERATE_THREAD_REPLIES`         | Moderate replies inside threads (default `off`)                    |
+| `RELAY_SLACK_BOT_TOKEN`           | *(optional)* token of the separate **relay** bot — see below       |
+| `RELAY_SLACK_SIGNING_SECRET`      | *(optional)* signing secret of the relay bot's app                 |
+| `MESSAGE_RELAY_ENABLED`           | DM the handler a copy of every message (default: `on` if `RELAY_SLACK_BOT_TOKEN` is set, else `off`) |
+| `MESSAGE_RELAY_MIN_CHARS`         | Skip relaying messages shorter than this (default `0` = relay all) |
+| `MESSAGE_RELAY_INCLUDE_THREADS`   | Relay thread replies too (default `on`)                            |
+| `MESSAGE_RELAY_INCLUDE_BOTS`      | Relay other apps' posts (default `off`)                            |
 | `AI_MAX_RETRIES`                  | Retries before falling back to heuristics (default `2`)            |
 | `SLACK_MAX_RETRIES`               | Attempts per Slack write (default `3`)                             |
 | `BACKGROUND_WORKERS`              | Threads for off-request AI/DM work (default `4`)                   |

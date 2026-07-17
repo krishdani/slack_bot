@@ -300,16 +300,122 @@ def process_reply_suggestion(client, event):
 
 
 # --------------------------------------------------------------------------- #
+# Message relay — DM the handler a copy of every channel message
+# --------------------------------------------------------------------------- #
+
+# Subtypes that still mean "a human just posted something". Everything else
+# carrying a subtype (channel_join, message_changed, message_deleted, ...) is
+# not a new message and is never relayed.
+_RELAYABLE_SUBTYPES = (None, "", "file_share", "thread_broadcast", "me_message")
+
+
+def _relay_skip_reason(client, event):
+    """Return why this message shouldn't be relayed, or None to proceed.
+
+    The thinnest gate in the bot. Unlike ``_skip_reason`` and
+    ``_reply_skip_reason`` there is no noise filter and no length floor by
+    default: the handler asked to see *every* message, so the only things
+    dropped are ones that aren't a person posting in a channel — edits, joins,
+    DMs to the bot, other apps' posts, and the bot's own alerts.
+    """
+    if not config.MESSAGE_RELAY_ENABLED:
+        return "message_relay_disabled"
+
+    if event.get("subtype") not in _RELAYABLE_SUBTYPES:
+        return "not_a_new_message"
+
+    # Another app posted this. Relaying it (including our own DMs, which come
+    # back as bot posts) would drown the handler in machine chatter.
+    if event.get("bot_id") and not config.MESSAGE_RELAY_INCLUDE_BOTS:
+        return "bot_message"
+
+    if event.get("channel_type") not in _MODERATED_CHANNEL_TYPES:
+        return "not_a_channel"
+
+    text = (event.get("text") or "").strip()
+    if len(text) < config.MESSAGE_RELAY_MIN_CHARS:
+        return "too_short"
+
+    thread_ts = event.get("thread_ts")
+    if (
+        thread_ts
+        and thread_ts != event.get("ts")
+        and not config.MESSAGE_RELAY_INCLUDE_THREADS
+    ):
+        return "thread_reply"
+
+    user_id = event.get("user")
+    if not user_id:
+        return "no_author"
+    if user_id == notify.bot_user_id(client):
+        return "own_message"
+
+    return None
+
+
+def process_message_relay(client, event):
+    """DM the handler a copy of one channel message. No AI, no judgement.
+
+    Runs independently of moderation and reply suggestions: it reports that a
+    person posted, nothing more. A message with no text (a bare file share) is
+    still relayed — the permalink is the useful part there.
+    """
+    started = time.perf_counter()
+
+    skip = _relay_skip_reason(client, event)
+    if skip:
+        logger.debug("message_relay_skipped reason=%s", skip)
+        return
+
+    channel_id = event.get("channel")
+    user_id = event.get("user")
+    text = (event.get("text") or "").strip()
+    ts = event.get("ts")
+    thread_ts = event.get("thread_ts")
+
+    channel_name = notify.channel_name_of(client, channel_id)
+    author_name = notify.display_name_of(client, user_id)
+
+    try:
+        notify.notify_handler(
+            title="📨 New Message",
+            message=templates.message_relay(
+                channel_name=channel_name,
+                author_name=author_name,
+                author_id=user_id,
+                timestamp=ts,
+                text=text,
+                permalink=notify.permalink(client, channel_id, ts),
+                is_thread_reply=bool(thread_ts and thread_ts != ts),
+            ),
+            priority="normal",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting must not crash the worker
+        logger.exception(
+            "message_relay_failed channel=%s user=%s error=%s",
+            channel_name, user_id, exc,
+        )
+        return
+
+    logger.info(
+        "message_relayed channel=%s author=%s length=%d duration_ms=%d",
+        channel_name, user_id, len(text), (time.perf_counter() - started) * 1000,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Dispatch
 # --------------------------------------------------------------------------- #
 
 
-# Capabilities a route may be limited to. In two-bot mode the original bot runs
-# JOIN + MODERATION and the new reply bot runs REPLY; in single-bot mode a route
-# passes capabilities=None and does everything.
+# Capabilities a route may be limited to. Each optional extra bot claims one and
+# the primary keeps the rest; in single-bot mode a route passes capabilities=None
+# and does everything.
 CAP_JOIN = "join"            # new-member alerts (team_join)
 CAP_MODERATION = "moderation"  # channel moderation alerts (message)
 CAP_REPLY = "reply"          # AI reply suggestions (message)
+CAP_RELAY = "relay"          # copy of every message (message)
 
 
 def dispatch(client, event, capabilities=None):
@@ -320,9 +426,10 @@ def dispatch(client, event, capabilities=None):
             route passes its own bot's client, so DMs come from the right bot.
         event: The Slack event payload.
         capabilities: Optional set restricting what this route does — any of
-            ``CAP_JOIN`` / ``CAP_MODERATION`` / ``CAP_REPLY``. A message can thus
-            drive moderation on one bot and reply-drafting on another. None means
-            do everything (single-bot mode).
+            ``CAP_JOIN`` / ``CAP_MODERATION`` / ``CAP_REPLY`` / ``CAP_RELAY``. A
+            message can thus drive moderation on one bot, reply-drafting on
+            another and relaying on a third. None means do everything
+            (single-bot mode).
 
     Unknown event types are ignored. Returns the name(s) of the handler(s)
     queued (useful for logging/tests), or None.
@@ -341,8 +448,8 @@ def dispatch(client, event, capabilities=None):
         return "process_team_join"
 
     if event_type == "message":
-        # Moderation and reply-suggestion are independent. In two-bot mode they
-        # live on different bots; in single-bot mode both run here.
+        # Moderation, reply-suggestion and relay are independent. Each may live
+        # on its own bot; in single-bot mode all three run here.
         queued = []
         if allowed(CAP_MODERATION):
             background.submit(process_message_event, client, event)
@@ -350,6 +457,9 @@ def dispatch(client, event, capabilities=None):
         if allowed(CAP_REPLY):
             background.submit(process_reply_suggestion, client, event)
             queued.append("process_reply_suggestion")
+        if allowed(CAP_RELAY):
+            background.submit(process_message_relay, client, event)
+            queued.append("process_message_relay")
         return ",".join(queued) if queued else None
 
     return None

@@ -168,6 +168,44 @@ def reply_suggestion(
     return "\n".join(lines)
 
 
+def message_relay(
+    channel_name,
+    author_name,
+    author_id,
+    timestamp,
+    text,
+    permalink=None,
+    is_thread_reply=False,
+):
+    """Body of the '📨 New Message' DM — a plain copy of what someone posted.
+
+    No assessment and no draft: this says only that a person posted a message,
+    where, and what it said. Deliberately shorter than the other alerts, because
+    the handler may receive one of these for every message in the workspace.
+    """
+    author = f"<@{author_id}>" if author_id else f"*{author_name}*"
+    where = f"#{channel_name}" + (" (thread reply)" if is_thread_reply else "")
+
+    lines = [
+        "*Channel:*",
+        where,
+        "",
+        "*Posted By:*",
+        f"{author_name} ({author})",
+        "",
+        "*Timestamp:*",
+        format_timestamp(timestamp),
+        "",
+        "*Message:*",
+        f"> {text}" if text else "_(no text — see the message in Slack)_",
+    ]
+
+    if permalink:
+        lines += ["", f"<{permalink}|View message in Slack>"]
+
+    return "\n".join(lines)
+
+
 def fallback_reply(author_name, channel_name, suggested_channel):
     """A friendly copy-paste reply for the keyword fallback (no AI available)."""
     first_name = (author_name or "there").split()[0]

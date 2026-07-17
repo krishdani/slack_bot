@@ -61,6 +61,14 @@ SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 REPLY_SLACK_BOT_TOKEN = os.environ.get("REPLY_SLACK_BOT_TOKEN")
 TWO_BOT_MODE = bool(REPLY_SLACK_BOT_TOKEN)
 
+# --- Optional third bot (message relay as a separate Slack app) -------------
+# Same idea as the reply bot: its own Slack app, its own token and signing
+# secret, its own route (/slack/relay-events). Its single job is to DM the
+# handler a copy of every message posted in any channel it can see. Leave it
+# unset and the relay feature — if enabled at all — runs on the primary app.
+RELAY_SLACK_BOT_TOKEN = os.environ.get("RELAY_SLACK_BOT_TOKEN")
+RELAY_BOT_MODE = bool(RELAY_SLACK_BOT_TOKEN)
+
 # The community handler (POC) who receives every DM the bot sends.
 # HANDLER_SLACK_USER is the new name; HUMAN_POC_USER_ID is the name this project
 # already used. They identify the same person, so we accept either and prefer
@@ -137,6 +145,37 @@ REPLY_SUGGESTIONS_INCLUDE_THREADS = _bool("REPLY_SUGGESTIONS_INCLUDE_THREADS", T
 
 
 # --------------------------------------------------------------------------- #
+# Message relay (new feature)
+# --------------------------------------------------------------------------- #
+# DM the handler a copy of *every* message posted in any channel the bot can
+# see: who said it, where, when, and the text itself. No AI, no judgement, no
+# threshold — if a human posted it, the handler hears about it.
+#
+# This is intentionally the bluntest feature in the bot. It is independent of
+# moderation and reply suggestions: one message can produce a relay, a
+# moderation alert, a reply suggestion, all three, or none.
+#
+# Defaults to ON only when RELAY_SLACK_BOT_TOKEN is set — i.e. configuring the
+# dedicated relay bot turns it on, and existing single-bot deployments keep
+# their current DM volume until they opt in explicitly.
+
+MESSAGE_RELAY_ENABLED = _bool("MESSAGE_RELAY_ENABLED", RELAY_BOT_MODE)
+
+# Relay messages shorter than this? 0 = relay everything, including "thanks"
+# and a lone emoji. That is the point of the feature, so 0 is the default;
+# raise it if the handler wants the noise filtered out.
+MESSAGE_RELAY_MIN_CHARS = _int("MESSAGE_RELAY_MIN_CHARS", 0)
+
+# Relay replies posted inside threads too, not just top-level messages.
+MESSAGE_RELAY_INCLUDE_THREADS = _bool("MESSAGE_RELAY_INCLUDE_THREADS", True)
+
+# Relay posts made by other bots/apps. Off by default: "someone" means a human,
+# and app posts (Zapier, Google Calendar, this bot's own alerts) would loop the
+# handler's DMs full of machine chatter.
+MESSAGE_RELAY_INCLUDE_BOTS = _bool("MESSAGE_RELAY_INCLUDE_BOTS", False)
+
+
+# --------------------------------------------------------------------------- #
 # Background processing
 # --------------------------------------------------------------------------- #
 
@@ -163,3 +202,13 @@ def get_reply_slack_client():
     before using it, so this is never built with a ``None`` token in practice.
     """
     return WebClient(token=REPLY_SLACK_BOT_TOKEN)
+
+
+@lru_cache(maxsize=1)
+def get_relay_slack_client():
+    """Return the process-wide Slack client for the RELAY bot.
+
+    Only meaningful when ``RELAY_BOT_MODE`` is on; callers guard on that before
+    using it, so this is never built with a ``None`` token in practice.
+    """
+    return WebClient(token=RELAY_SLACK_BOT_TOKEN)
