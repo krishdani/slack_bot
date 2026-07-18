@@ -196,24 +196,31 @@ def permalink(client, channel_id, message_ts):
         return None
 
 
-def dm_user(client, user_id, text):
+def dm_user(client, user_id, text, blocks=None):
     """Open (or reuse) a DM with a user and post a message. Returns True/False.
 
     Transient failures (rate limits, 5xx, dropped connections) are retried with
     backoff. A permanent failure is logged and returns False — it never raises,
     because a failed notification must not take down the caller.
+
+    ``text`` is always sent (Slack uses it as the notification/fallback). When
+    ``blocks`` is given it drives the on-screen rendering, so ``text`` should
+    still summarise the same content for accessibility and push notifications.
     """
     if not user_id:
         return False
 
     def _send():
         im = client.conversations_open(users=user_id)
-        client.chat_postMessage(
-            channel=im["channel"]["id"],
-            text=text,
-            unfurl_links=False,
-            unfurl_media=False,
-        )
+        kwargs = {
+            "channel": im["channel"]["id"],
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        if blocks:
+            kwargs["blocks"] = blocks
+        client.chat_postMessage(**kwargs)
 
     try:
         with_retry(
@@ -240,7 +247,7 @@ def dm_poc(client, text):
     return dm_user(client, HUMAN_POC_USER_ID, text)
 
 
-def notify_handler(title, message, priority="normal", client=None):
+def notify_handler(title, message, priority="normal", client=None, blocks=None):
     """DM the configured community handler. The one entry point for alerts.
 
     Args:
@@ -249,6 +256,9 @@ def notify_handler(title, message, priority="normal", client=None):
         priority: 'normal' | 'high' | 'urgent'. Affects the visual prefix and
             the log level, never the destination.
         client: Slack client; defaults to the shared one from ``config``.
+        blocks: Optional Block Kit blocks (e.g. an alert with an action button).
+            When given they drive the rendering; ``title``/``message`` remain the
+            text fallback.
 
     Returns:
         True if Slack accepted the message, False otherwise. Never raises, so a
@@ -264,7 +274,9 @@ def notify_handler(title, message, priority="normal", client=None):
 
     client = client or config.get_slack_client()
     prefix = _PRIORITY_PREFIX.get(priority, "")
-    delivered = dm_user(client, HANDLER_USER_ID, f"{prefix}*{title}*\n\n{message}")
+    delivered = dm_user(
+        client, HANDLER_USER_ID, f"{prefix}*{title}*\n\n{message}", blocks=blocks
+    )
 
     log = logger.info if delivered else logger.error
     log(

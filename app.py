@@ -20,6 +20,7 @@ Everything is a flag for the POC to review — the bot takes no action on users,
 and never replies in a public channel.
 """
 
+import json
 import logging
 import os
 import time
@@ -30,11 +31,13 @@ from flask import Flask, jsonify, request
 from slack_sdk.errors import SlackApiError
 
 import ai
+import background
 import collect
 import config
 import handlers
 import notify
 import store
+import templates
 from analysis import build_digest, count_flags, count_replies, format_daily_report
 from slack_verify import is_valid_slack_request
 
@@ -242,6 +245,59 @@ def slack_relay_events():
     return _handle_slack_events(
         RELAY_SLACK_SIGNING_SECRET, relay_slack_client, {handlers.CAP_RELAY}
     )
+
+
+@app.route("/slack/interactivity", methods=["POST"])
+def slack_interactivity():
+    """Handle interactive component clicks (currently the 'Send welcome DM' button).
+
+    The new-member alert lives on the primary app, so its button clicks are
+    verified with the primary signing secret. Slack sends these as a
+    form-encoded ``payload`` field; we verify the signature over the raw body,
+    hand the actual send off to a background worker, and 200 immediately.
+    """
+    raw_body = request.get_data()
+    if not is_valid_slack_request(
+        signing_secret=SLACK_SIGNING_SECRET,
+        request_body=raw_body,
+        timestamp=request.headers.get("X-Slack-Request-Timestamp", ""),
+        signature=request.headers.get("X-Slack-Signature", ""),
+    ):
+        logger.warning("Rejected interactivity request with invalid Slack signature.")
+        return jsonify(error="invalid signature"), 403
+
+    try:
+        payload = json.loads(request.form.get("payload", "{}"))
+    except (TypeError, ValueError):
+        logger.warning("interactivity: unparseable payload")
+        return "", 200
+
+    if payload.get("type") != "block_actions":
+        return "", 200  # nothing else is wired up yet
+
+    response_url = payload.get("response_url")
+    original_blocks = (payload.get("message") or {}).get("blocks")
+
+    for action in payload.get("actions", []):
+        if action.get("action_id") != templates.SEND_WELCOME_DM_ACTION:
+            continue
+        try:
+            data = json.loads(action.get("value") or "{}")
+        except (TypeError, ValueError):
+            data = {}
+        joiner_id = data.get("user_id")
+        joiner_name = data.get("name")
+        logger.info("interactivity: send_welcome_dm joiner=%s", joiner_id)
+        background.submit(
+            handlers.process_welcome_dm,
+            slack_client,
+            joiner_id,
+            joiner_name,
+            response_url,
+            original_blocks,
+        )
+
+    return "", 200
 
 
 def _authorized(req):

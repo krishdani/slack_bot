@@ -5,7 +5,14 @@ No Slack calls, no decisions about *whether* to notify. That keeps the wording
 easy to change without touching moderation logic.
 """
 
+import json
 from datetime import datetime, timezone
+
+# Interactivity identifiers for the "Send welcome DM" button on the new-member
+# alert. Kept here (next to the block that carries them) so templates, handlers
+# and the Flask route agree on the same strings without a circular import.
+SEND_WELCOME_DM_ACTION = "send_welcome_dm"
+WELCOME_DM_BLOCK_ID = "welcome_dm_actions"
 
 
 def format_timestamp(ts):
@@ -63,6 +70,88 @@ def new_member_message(
         lines += ["", "*Workspace:*", workspace]
     lines += ["", "Please welcome them to the community."]
     return "\n".join(lines)
+
+
+def welcome_dm_message(name):
+    """The fixed welcome DM sent to a new joiner when the handler chooses to.
+
+    Only the first name is interpolated; everything else is a fixed template so
+    every new member gets the same message. Falls back to a friendly 'there'
+    when no name is available.
+    """
+    first_name = (name or "").strip().split()[0] if (name or "").strip() else "there"
+    return (
+        f"Hey {first_name}! Welcome to The Product Folks ✨\n\n"
+        "You're now part of a community of people who love building products and "
+        "helping each other grow. \n"
+        "Explore the channels, join the conversations, and don't hesitate to ask "
+        "questions or share what you're working on—we'd love to hear about it!\n\n"
+        "📌 Resources:\n\n"
+        " 📅 Events: https://www.theproductfolks.com/grabchai\n"
+        " 💼 Jobs: https://www.theproductfolks.com/product-management-jobs\n"
+        " 📚 Academy: https://www.theproductfolks.com/product-academy\n\n"
+        "💬 Drop a quick intro in #welcome-to-the-club and tell us what you're "
+        "building.\n\n"
+        " Happy to have you here! 🌱"
+    )
+
+
+def new_member_blocks(title, body, joiner_id, joiner_name):
+    """Block Kit version of the new-member alert, with a 'Send welcome DM' button.
+
+    The alert body is rendered as a section; the button carries the joiner's id
+    and name in its ``value`` so the interactivity handler knows exactly who to
+    welcome without re-reading the event. Clicking it DMs the joiner the fixed
+    ``welcome_dm_message``.
+    """
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{title}*\n\n{body}"},
+        },
+        {
+            "type": "actions",
+            "block_id": WELCOME_DM_BLOCK_ID,
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": SEND_WELCOME_DM_ACTION,
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Send welcome DM",
+                        "emoji": True,
+                    },
+                    "style": "primary",
+                    "value": json.dumps({"user_id": joiner_id, "name": joiner_name}),
+                }
+            ],
+        },
+    ]
+
+
+def welcome_dm_sent_blocks(original_blocks, joiner_id, delivered):
+    """Rebuild the alert after the button is clicked: drop the button, add a note.
+
+    Takes the original message's blocks (Slack echoes them back on the button
+    click), removes the actions block so the button can't be clicked twice, and
+    appends a context line saying whether the welcome DM went out.
+    """
+    kept = [
+        block
+        for block in (original_blocks or [])
+        if block.get("block_id") != WELCOME_DM_BLOCK_ID
+    ]
+    if delivered:
+        note = f"✅ Welcome DM sent to <@{joiner_id}>."
+    else:
+        note = (
+            f"⚠️ Couldn't send the welcome DM to <@{joiner_id}> — "
+            "please reach out to them directly."
+        )
+    kept.append(
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": note}]}
+    )
+    return kept
 
 
 def moderation_alert(

@@ -49,6 +49,75 @@ class ModerationFlowTests(unittest.TestCase):
 
         notify_handler.assert_called_once()
 
+    # --- Welcome DM (the new-member button) ---------------------------------
+
+    def test_welcome_dm_message_uses_first_name_and_fixed_body(self):
+        text = templates.welcome_dm_message("Ram Kumar")
+        self.assertTrue(text.startswith("Hey Ram!"))
+        self.assertIn("Welcome to The Product Folks", text)
+        self.assertIn("https://www.theproductfolks.com/grabchai", text)
+        self.assertIn("#welcome-to-the-club", text)
+
+    def test_welcome_dm_message_falls_back_when_no_name(self):
+        self.assertTrue(templates.welcome_dm_message("").startswith("Hey there!"))
+        self.assertTrue(templates.welcome_dm_message(None).startswith("Hey there!"))
+
+    def test_new_member_blocks_carry_a_send_button_with_joiner(self):
+        blocks = templates.new_member_blocks(
+            "🎉 New Member Joined", "body text", "U123", "Ram"
+        )
+        button = blocks[-1]["elements"][0]
+        self.assertEqual(button["action_id"], templates.SEND_WELCOME_DM_ACTION)
+        import json as _json
+        value = _json.loads(button["value"])
+        self.assertEqual(value, {"user_id": "U123", "name": "Ram"})
+
+    def test_team_join_alert_includes_welcome_button_when_enabled(self):
+        client = object()
+        with patch("store.record_member", return_value=True), patch(
+            "notify.bot_user_id", return_value=None
+        ), patch("notify.member_profile_data", return_value={"name": "Ram"}), patch(
+            "notify.display_name_of", return_value="Ram"
+        ), patch("notify.workspace_name", return_value="Example"), patch(
+            "config.WELCOME_DM_ENABLED", True
+        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+            handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
+
+        blocks = notify_handler.call_args.kwargs["blocks"]
+        self.assertIsNotNone(blocks)
+        self.assertEqual(
+            blocks[-1]["elements"][0]["action_id"], templates.SEND_WELCOME_DM_ACTION
+        )
+
+    def test_team_join_alert_has_no_button_when_disabled(self):
+        client = object()
+        with patch("store.record_member", return_value=True), patch(
+            "notify.bot_user_id", return_value=None
+        ), patch("notify.member_profile_data", return_value={"name": "Ram"}), patch(
+            "notify.display_name_of", return_value="Ram"
+        ), patch("notify.workspace_name", return_value="Example"), patch(
+            "config.WELCOME_DM_ENABLED", False
+        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+            handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
+
+        self.assertIsNone(notify_handler.call_args.kwargs["blocks"])
+
+    def test_process_welcome_dm_sends_fixed_message_to_joiner(self):
+        client = object()
+        with patch("notify.dm_user", return_value=True) as dm_user, patch(
+            "notify.display_name_of", return_value="Ram"
+        ):
+            handlers.process_welcome_dm(client, "U123", "Ram")
+
+        dm_user.assert_called_once()
+        sent_text = dm_user.call_args.args[2]
+        self.assertTrue(sent_text.startswith("Hey Ram!"))
+
+    def test_process_welcome_dm_noops_without_joiner(self):
+        with patch("notify.dm_user") as dm_user:
+            handlers.process_welcome_dm(object(), None, "Ram")
+        dm_user.assert_not_called()
+
     def test_process_message_event_skips_empty_message(self):
         client = object()
         with patch("moderation.evaluate") as evaluate, patch("notify.notify_handler") as notify_handler:

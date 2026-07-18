@@ -67,25 +67,76 @@ def process_team_join(client, user_id, event_ts=None):
 
     try:
         profile = notify.member_profile_data(client, user_id)
+        member_name = profile.get("name") or notify.display_name_of(client, user_id)
+        title = "🎉 New Member Joined"
+        body = templates.new_member_message(
+            name=member_name,
+            user_id=user_id,
+            joined_ts=event_ts or time.time(),
+            workspace=notify.workspace_name(client),
+            email=profile.get("email"),
+            title=profile.get("title"),
+            company=profile.get("company"),
+            timezone=profile.get("timezone"),
+            channels_joined=profile.get("channels_joined"),
+            profile_link=profile.get("profile_link"),
+        )
+        # With the feature on, the alert carries a button the handler can click
+        # to DM the joiner the fixed welcome message. Off => the plain alert.
+        blocks = (
+            templates.new_member_blocks(title, body, user_id, member_name)
+            if config.WELCOME_DM_ENABLED
+            else None
+        )
         notify.notify_handler(
-            title="🎉 New Member Joined",
-            message=templates.new_member_message(
-                name=profile.get("name") or notify.display_name_of(client, user_id),
-                user_id=user_id,
-                joined_ts=event_ts or time.time(),
-                workspace=notify.workspace_name(client),
-                email=profile.get("email"),
-                title=profile.get("title"),
-                company=profile.get("company"),
-                timezone=profile.get("timezone"),
-                channels_joined=profile.get("channels_joined"),
-                profile_link=profile.get("profile_link"),
-            ),
+            title=title,
+            message=body,
             priority="normal",
             client=client,
+            blocks=blocks,
         )
     except Exception as exc:  # noqa: BLE001 — alerting should never crash the worker
         logger.exception("team_join_alert_failed user=%s error=%s", user_id, exc)
+
+
+def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, original_blocks=None):
+    """DM a new joiner the fixed welcome message — triggered by the handler's button.
+
+    Runs off the interactivity request thread (see ``app.py``) so Slack still
+    gets its fast 200. After sending, the original alert is updated via
+    ``response_url`` to drop the button and note whether the DM went out. Every
+    failure is logged and swallowed — a welcome that doesn't send must not crash
+    the worker.
+    """
+    if not joiner_id:
+        logger.warning("welcome_dm_skipped reason=no_joiner_id")
+        return
+
+    name = joiner_name or notify.display_name_of(client, joiner_id)
+    delivered = notify.dm_user(
+        client, joiner_id, templates.welcome_dm_message(name)
+    )
+    logger.info("welcome_dm joiner=%s delivered=%s", joiner_id, delivered)
+
+    if not response_url:
+        return
+
+    try:
+        from slack_sdk.webhook import WebhookClient
+
+        WebhookClient(response_url).send(
+            replace_original=True,
+            text=(
+                f"✅ Welcome DM sent to <@{joiner_id}>."
+                if delivered
+                else f"⚠️ Couldn't send the welcome DM to <@{joiner_id}>."
+            ),
+            blocks=templates.welcome_dm_sent_blocks(
+                original_blocks, joiner_id, delivered
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — updating the alert is best-effort
+        logger.warning("welcome_dm_update_failed joiner=%s error=%s", joiner_id, exc)
 
 
 # --------------------------------------------------------------------------- #

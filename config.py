@@ -89,6 +89,12 @@ SLACK_MAX_RETRIES = _int("SLACK_MAX_RETRIES", 3)
 # daily report — joins are still recorded and still listed there.
 REALTIME_MEMBER_ALERTS = _bool("REALTIME_MEMBER_ALERTS", True)
 
+# Add a "Send welcome DM" button to the new-member alert. When the handler
+# clicks it, the bot DMs the new joiner the fixed welcome message
+# (templates.welcome_dm_message). Requires the app's Interactivity Request URL
+# to point at /slack/interactivity. Turn off to keep the plain text-only alert.
+WELCOME_DM_ENABLED = _bool("WELCOME_DM_ENABLED", True)
+
 
 # --------------------------------------------------------------------------- #
 # Real-time channel moderation (Feature 2)
