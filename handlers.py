@@ -107,16 +107,40 @@ def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, origin
     ``response_url`` to drop the button and note whether the DM went out. Every
     failure is logged and swallowed — a welcome that doesn't send must not crash
     the worker.
+
+    When ``HANDLER_USER_TOKEN`` is configured the DM is sent with the handler's
+    user token, so the joiner sees it from a real person instead of the bot. If
+    that token is missing, revoked or rejected we fall back to the bot client —
+    a DM from the bot beats no welcome at all.
     """
     if not joiner_id:
         logger.warning("welcome_dm_skipped reason=no_joiner_id")
         return
 
+    # Profile lookups stay on the bot client: the user token isn't guaranteed to
+    # carry the `users:read` scope, and this is only used for the greeting name.
     name = joiner_name or notify.display_name_of(client, joiner_id)
-    delivered = notify.dm_user(
-        client, joiner_id, templates.welcome_dm_message(name)
+    message = templates.welcome_dm_message(name)
+
+    as_user = config.get_handler_user_client()
+    sent_as = "bot"
+    delivered = False
+    if as_user is not None:
+        delivered = notify.dm_user(as_user, joiner_id, message)
+        sent_as = "handler"
+        if not delivered:
+            logger.warning(
+                "welcome_dm_user_token_failed joiner=%s — falling back to the bot",
+                joiner_id,
+            )
+            sent_as = "bot"
+
+    if not delivered:
+        delivered = notify.dm_user(client, joiner_id, message)
+
+    logger.info(
+        "welcome_dm joiner=%s delivered=%s sent_as=%s", joiner_id, delivered, sent_as
     )
-    logger.info("welcome_dm joiner=%s delivered=%s", joiner_id, delivered)
 
     if not response_url:
         return

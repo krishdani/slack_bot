@@ -31,6 +31,10 @@ services:
       # every real-time alert. HUMAN_POC_USER_ID is accepted as a fallback.
       - key: HANDLER_SLACK_USER
         sync: false
+      # Optional user token (xoxp-) so the welcome DM is authored by the handler
+      # instead of the bot. Unset => the bot sends it, as before.
+      - key: HANDLER_USER_TOKEN
+        sync: false
       # Shared secret protecting the /tasks/* triggers.
       - key: DIGEST_TRIGGER_TOKEN
         sync: false

@@ -113,6 +113,38 @@ class ModerationFlowTests(unittest.TestCase):
         sent_text = dm_user.call_args.args[2]
         self.assertTrue(sent_text.startswith("Hey Ram!"))
 
+    def test_process_welcome_dm_sends_as_handler_when_user_token_set(self):
+        bot, as_user = object(), object()
+        with patch("notify.dm_user", return_value=True) as dm_user, patch(
+            "config.get_handler_user_client", return_value=as_user
+        ), patch("notify.display_name_of", return_value="Ram"):
+            handlers.process_welcome_dm(bot, "U123", "Ram")
+
+        dm_user.assert_called_once()
+        # The DM must go out on the user-token client, not the bot client.
+        self.assertIs(dm_user.call_args.args[0], as_user)
+
+    def test_process_welcome_dm_falls_back_to_bot_when_user_token_fails(self):
+        bot, as_user = object(), object()
+        with patch("notify.dm_user", side_effect=[False, True]) as dm_user, patch(
+            "config.get_handler_user_client", return_value=as_user
+        ), patch("notify.display_name_of", return_value="Ram"):
+            handlers.process_welcome_dm(bot, "U123", "Ram")
+
+        self.assertEqual(dm_user.call_count, 2)
+        self.assertIs(dm_user.call_args_list[0].args[0], as_user)
+        self.assertIs(dm_user.call_args_list[1].args[0], bot)
+
+    def test_process_welcome_dm_uses_bot_when_no_user_token(self):
+        bot = object()
+        with patch("notify.dm_user", return_value=True) as dm_user, patch(
+            "config.get_handler_user_client", return_value=None
+        ), patch("notify.display_name_of", return_value="Ram"):
+            handlers.process_welcome_dm(bot, "U123", "Ram")
+
+        dm_user.assert_called_once()
+        self.assertIs(dm_user.call_args.args[0], bot)
+
     def test_process_welcome_dm_noops_without_joiner(self):
         with patch("notify.dm_user") as dm_user:
             handlers.process_welcome_dm(object(), None, "Ram")

@@ -77,6 +77,17 @@ HANDLER_SLACK_USER = (
     os.environ.get("HANDLER_SLACK_USER") or os.environ.get("HUMAN_POC_USER_ID")
 )
 
+# --- Optional user token (post as the handler, not as the bot) --------------
+# A bot token always authors messages as the bot. To make the welcome DM come
+# from the handler's own Slack account it has to be sent with *their* user token
+# (xoxp-...), obtained by installing the app with the `chat:write` and
+# `im:write` USER scopes and copying the "User OAuth Token".
+#
+# This is a single fixed token, so every welcome DM is authored by whoever owns
+# it, regardless of who clicked the button. Leave it unset and the DM keeps
+# coming from the bot exactly as before.
+HANDLER_USER_TOKEN = os.environ.get("HANDLER_USER_TOKEN")
+
 # How many times a failed Slack write is retried before we give up and log it.
 SLACK_MAX_RETRIES = _int("SLACK_MAX_RETRIES", 3)
 
@@ -208,6 +219,19 @@ def get_reply_slack_client():
     before using it, so this is never built with a ``None`` token in practice.
     """
     return WebClient(token=REPLY_SLACK_BOT_TOKEN)
+
+
+@lru_cache(maxsize=1)
+def get_handler_user_client():
+    """Return a Slack client authenticated as the handler, or None if unset.
+
+    Messages sent with this client are authored by the human who owns the token
+    rather than by the bot. Callers must treat ``None`` as "not configured" and
+    fall back to the bot client.
+    """
+    if not HANDLER_USER_TOKEN:
+        return None
+    return WebClient(token=HANDLER_USER_TOKEN)
 
 
 @lru_cache(maxsize=1)
