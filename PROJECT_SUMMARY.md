@@ -97,7 +97,7 @@ All `/tasks/*` endpoints are protected by `DIGEST_TRIGGER_TOKEN` (`?token=...`).
 
 - **Host:** Render (free web service), start command `gunicorn app:app --timeout 120`
 - **Repo:** `github.com/ZalakRajvanshi/tpf-community-bot`, deploys on push to `main`
-- **URL:** `https://tpf-community-bot.onrender.com`
+- **URL:** `https://tpf-community-bot-1gtd.onrender.com`
 - **Schedule:** cron-job.org hits `/tasks/daily-report` daily at **11:00**
   - ⚠️ Verify the cron job's timezone is **Asia/Kolkata**, not UTC (else it fires at 4:30 PM IST).
 
@@ -164,11 +164,11 @@ manually) → live history fetch (no storage) → AI classification → clickabl
 
 ```bash
 # Join all public channels (run once after install)
-curl "https://tpf-community-bot.onrender.com/tasks/join-public?token=YOUR_TOKEN"
+curl "https://tpf-community-bot-1gtd.onrender.com/tasks/join-public?token=YOUR_TOKEN"
 
 # Trigger the daily report manually
-curl "https://tpf-community-bot.onrender.com/tasks/daily-report?token=YOUR_TOKEN"
+curl "https://tpf-community-bot-1gtd.onrender.com/tasks/daily-report?token=YOUR_TOKEN"
 
 # Diagnostic: what can the bot see right now?
-curl "https://tpf-community-bot.onrender.com/tasks/peek?token=YOUR_TOKEN"
+curl "https://tpf-community-bot-1gtd.onrender.com/tasks/peek?token=YOUR_TOKEN"
 ```
