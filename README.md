@@ -26,10 +26,13 @@ copy-paste-ready reply, and a confidence score. **If it belongs, nothing
 happens at all** — no notification, no reply, no storage.
 
 **4. Message relay** *(optional, `MESSAGE_RELAY_ENABLED`)* — the opposite of
-moderation: **every** message posted in **any** channel is DM'd to the handler
-as-is (who, where, when, the text, a link). No AI, no judgement, no threshold.
-Best run as its own Slack app (see [Message relay bot](#message-relay-bot)) so
-those DMs arrive from their own bot rather than mixed in with the alerts.
+moderation: **every** message posted in **any** channel is DM'd as-is (who,
+where, when, the text, a link). No AI, no judgement, no threshold. The copies go
+to `MESSAGE_RELAY_USER_ID` — this is the one feature with its own recipient, so
+the firehose can land on a different person from the moderation handler; leave it
+unset and it goes to the handler like everything else. Best run as its own Slack
+app (see [Message relay bot](#message-relay-bot)) so those DMs arrive from their
+own bot rather than mixed in with the alerts.
 
 > ⚠️ This is high volume by design — one DM per message, workspace-wide. Use
 > `MESSAGE_RELAY_MIN_CHARS` / `MESSAGE_RELAY_INCLUDE_THREADS` to trim it, or
@@ -217,7 +220,8 @@ cp .env.example .env
 | `MODERATE_THREAD_REPLIES`         | Moderate replies inside threads (default `off`)                    |
 | `RELAY_SLACK_BOT_TOKEN`           | *(optional)* token of the separate **relay** bot — see below       |
 | `RELAY_SLACK_SIGNING_SECRET`      | *(optional)* signing secret of the relay bot's app                 |
-| `MESSAGE_RELAY_ENABLED`           | DM the handler a copy of every message (default: `on` if `RELAY_SLACK_BOT_TOKEN` is set, else `off`) |
+| `MESSAGE_RELAY_ENABLED`           | DM a copy of every message (default: `on` if `RELAY_SLACK_BOT_TOKEN` is set, else `off`) |
+| `MESSAGE_RELAY_USER_ID`           | Slack member id who receives the relayed copies (default: `HANDLER_SLACK_USER`) |
 | `MESSAGE_RELAY_MIN_CHARS`         | Skip relaying messages shorter than this (default `0` = relay all) |
 | `MESSAGE_RELAY_INCLUDE_THREADS`   | Relay thread replies too (default `on`)                            |
 | `MESSAGE_RELAY_INCLUDE_BOTS`      | Relay other apps' posts (default `off`)                            |

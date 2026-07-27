@@ -465,6 +465,9 @@ def process_message_relay(client, event):
             ),
             priority="normal",
             client=client,
+            # The relay has its own recipient (MESSAGE_RELAY_USER_ID); it falls
+            # back to the handler when that isn't configured.
+            user_id=config.MESSAGE_RELAY_USER_ID,
         )
     except Exception as exc:  # noqa: BLE001 — alerting must not crash the worker
         logger.exception(

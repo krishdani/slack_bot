@@ -247,7 +247,8 @@ def dm_poc(client, text):
     return dm_user(client, HUMAN_POC_USER_ID, text)
 
 
-def notify_handler(title, message, priority="normal", client=None, blocks=None):
+def notify_handler(title, message, priority="normal", client=None, blocks=None,
+                   user_id=None):
     """DM the configured community handler. The one entry point for alerts.
 
     Args:
@@ -259,12 +260,16 @@ def notify_handler(title, message, priority="normal", client=None, blocks=None):
         blocks: Optional Block Kit blocks (e.g. an alert with an action button).
             When given they drive the rendering; ``title``/``message`` remain the
             text fallback.
+        user_id: Optional Slack user id to DM instead of the handler. Used by
+            features with their own recipient (the message relay), so one alert
+            stream can go to a different person without changing the rest.
 
     Returns:
         True if Slack accepted the message, False otherwise. Never raises, so a
         notification failure can't break the event being processed.
     """
-    if not HANDLER_USER_ID:
+    recipient = user_id or HANDLER_USER_ID
+    if not recipient:
         logger.warning(
             "notify_skipped title=%r reason=no_handler_configured "
             "(set HANDLER_SLACK_USER or HUMAN_POC_USER_ID)",
@@ -275,12 +280,12 @@ def notify_handler(title, message, priority="normal", client=None, blocks=None):
     client = client or config.get_slack_client()
     prefix = _PRIORITY_PREFIX.get(priority, "")
     delivered = dm_user(
-        client, HANDLER_USER_ID, f"{prefix}*{title}*\n\n{message}", blocks=blocks
+        client, recipient, f"{prefix}*{title}*\n\n{message}", blocks=blocks
     )
 
     log = logger.info if delivered else logger.error
     log(
-        "notify_handler title=%r priority=%s delivered=%s",
-        title, priority, delivered,
+        "notify_handler title=%r priority=%s recipient=%s delivered=%s",
+        title, priority, recipient, delivered,
     )
     return delivered

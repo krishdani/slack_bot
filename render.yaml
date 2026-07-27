@@ -66,9 +66,12 @@ services:
         value: "15"
       - key: REPLY_SUGGESTIONS_INCLUDE_THREADS
         value: "on"
-      # --- Message relay --- (DMs the handler a COPY of every message; no AI)
+      # --- Message relay --- (DMs a COPY of every message; no AI)
       - key: MESSAGE_RELAY_ENABLED
         value: "on"
+      # Slack member id of whoever receives the copies. Blank => the handler.
+      - key: MESSAGE_RELAY_USER_ID
+        sync: false
       - key: MESSAGE_RELAY_MIN_CHARS
         value: "0"
       - key: MESSAGE_RELAY_INCLUDE_THREADS

@@ -5,6 +5,7 @@ from slack_sdk.errors import SlackApiError
 
 import ai
 import handlers
+import notify
 import templates
 
 
@@ -350,6 +351,40 @@ class ModerationFlowTests(unittest.TestCase):
         self.assertIn("#product-analytics-101", body)
         self.assertIn("<@U1>", body)
         self.assertIn("Amplitude", body)
+
+    def test_message_relay_goes_to_its_own_recipient(self):
+        # The relay is the only feature with a separate recipient, so the
+        # firehose can land on someone other than the moderation handler.
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("config.MESSAGE_RELAY_USER_ID", "U_RELAY"), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event())
+
+        self.assertEqual(notify_handler.call_args.kwargs["user_id"], "U_RELAY")
+
+    def test_notify_handler_falls_back_to_the_handler_without_a_recipient(self):
+        # MESSAGE_RELAY_USER_ID unset => notify_handler is passed None and DMs
+        # the configured handler, exactly as before this option existed.
+        with patch("notify.HANDLER_USER_ID", "U_HANDLER"), patch(
+            "notify.dm_user", return_value=True
+        ) as dm_user:
+            notify.notify_handler(title="📨 New Message", message="body",
+                                  client=object(), user_id=None)
+
+        self.assertEqual(dm_user.call_args[0][1], "U_HANDLER")
+
+    def test_notify_handler_dms_the_explicit_recipient(self):
+        with patch("notify.HANDLER_USER_ID", "U_HANDLER"), patch(
+            "notify.dm_user", return_value=True
+        ) as dm_user:
+            notify.notify_handler(title="📨 New Message", message="body",
+                                  client=object(), user_id="U_RELAY")
+
+        self.assertEqual(dm_user.call_args[0][1], "U_RELAY")
 
     def test_message_relay_sends_for_noise_the_other_features_skip(self):
         # "thanks" is dropped by moderation and reply suggestions. The relay's

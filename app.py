@@ -104,8 +104,9 @@ if not config.TWO_BOT_MODE and not config.RELAY_BOT_MODE:
 
 if config.MESSAGE_RELAY_ENABLED:
     logger.info(
-        "Message relay ENABLED — the handler is DM'd a copy of every message "
+        "Message relay ENABLED — %s is DM'd a copy of every message "
         "(min_chars=%d threads=%s bots=%s). Set MESSAGE_RELAY_ENABLED=off to stop.",
+        config.MESSAGE_RELAY_USER_ID or "nobody (no recipient configured!)",
         config.MESSAGE_RELAY_MIN_CHARS,
         config.MESSAGE_RELAY_INCLUDE_THREADS,
         config.MESSAGE_RELAY_INCLUDE_BOTS,

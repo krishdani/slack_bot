@@ -178,6 +178,13 @@ REPLY_SUGGESTIONS_INCLUDE_THREADS = _bool("REPLY_SUGGESTIONS_INCLUDE_THREADS", T
 
 MESSAGE_RELAY_ENABLED = _bool("MESSAGE_RELAY_ENABLED", RELAY_BOT_MODE)
 
+# Who receives the relayed copies. The relay is the highest-volume feature in
+# the bot, so it often belongs to someone other than the person handling
+# moderation and new-member alerts. Set this to that person's Slack user id
+# (Slack profile > ... > Copy member ID, e.g. U012ABCDEF). Left unset, relays go
+# to HANDLER_SLACK_USER like every other alert — the previous behaviour.
+MESSAGE_RELAY_USER_ID = os.environ.get("MESSAGE_RELAY_USER_ID") or HANDLER_SLACK_USER
+
 # Relay messages shorter than this? 0 = relay everything, including "thanks"
 # and a lone emoji. That is the point of the feature, so 0 is the default;
 # raise it if the handler wants the noise filtered out.
