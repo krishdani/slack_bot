@@ -483,6 +483,32 @@ class ModerationFlowTests(unittest.TestCase):
 
         notify_handler.assert_not_called()
 
+    def test_message_relay_skips_the_recipients_own_messages(self):
+        # Khushi receives the relay, so relaying her own posts back to her is
+        # noise — she just wrote them.
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("config.MESSAGE_RELAY_USER_ID", "U_KHUSHI"), patch(
+            "notify.notify_handler"
+        ) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event(user="U_KHUSHI"))
+
+        notify_handler.assert_not_called()
+
+    def test_message_relay_still_relays_everyone_else(self):
+        client = object()
+        bot_id, channel, name, link = self._relay_patches()
+        with bot_id, channel, name, link, patch(
+            "config.MESSAGE_RELAY_ENABLED", True
+        ), patch("config.MESSAGE_RELAY_USER_ID", "U_KHUSHI"), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
+            handlers.process_message_relay(client, self._relay_event(user="U_SOMEONE"))
+
+        notify_handler.assert_called_once()
+
     def test_message_relay_skips_the_bots_own_messages(self):
         client = object()
         with patch("config.MESSAGE_RELAY_ENABLED", True), patch(

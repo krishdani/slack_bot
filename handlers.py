@@ -422,6 +422,13 @@ def _relay_skip_reason(client, event):
     user_id = event.get("user")
     if not user_id:
         return "no_author"
+
+    # Relaying the recipient's own messages back to them is pure noise — they
+    # were the one who just posted it. Checked before the bot lookup below
+    # because it's a plain comparison and that one calls Slack.
+    if user_id == config.MESSAGE_RELAY_USER_ID:
+        return "recipients_own_message"
+
     if user_id == notify.bot_user_id(client):
         return "own_message"
 

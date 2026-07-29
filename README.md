@@ -34,6 +34,9 @@ unset and it goes to the handler like everything else. Best run as its own Slack
 app (see [Message relay bot](#message-relay-bot)) so those DMs arrive from their
 own bot rather than mixed in with the alerts.
 
+The recipient's **own** messages are never relayed — echoing someone's post back
+to them the moment they send it is pure noise.
+
 > ⚠️ This is high volume by design — one DM per message, workspace-wide. Use
 > `MESSAGE_RELAY_MIN_CHARS` / `MESSAGE_RELAY_INCLUDE_THREADS` to trim it, or
 > `MESSAGE_RELAY_ENABLED=off` to stop it.
