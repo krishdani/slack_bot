@@ -19,7 +19,7 @@ def format_timestamp(ts):
 
 
 def new_member_message(name, user_id, joined_ts, workspace=None):
-    """Body of the '🎉 New Member Joined' DM."""
+    """Body of the '🎉 New Member Joined' DM (joined the workspace)."""
     lines = [
         "*Name:*",
         name,
@@ -27,15 +27,47 @@ def new_member_message(name, user_id, joined_ts, workspace=None):
         "*Mention:*",
         f"<@{user_id}>",
         "",
-        "*channel:*",
-        "(required if he had joined any channel)",
-        "",
         "*Joined:*",
         format_timestamp(joined_ts),
     ]
     if workspace:
         lines += ["", "*Workspace:*", workspace]
     lines += ["", "Please welcome them to the community."]
+    return "\n".join(lines)
+
+
+def channel_join_message(
+    name,
+    user_id,
+    channel_name,
+    channel_id,
+    joined_ts,
+    inviter_id=None,
+):
+    """Body of the '👋 New Member in #channel' DM (joined a single channel).
+
+    ``inviter_id`` is present only when someone invited them; a self-join (or a
+    join via a shared link) carries no inviter, so we omit the line entirely
+    rather than rendering 'None'.
+    """
+    channel = f"<#{channel_id}|{channel_name}>" if channel_id else f"#{channel_name}"
+
+    lines = [
+        "*Name:*",
+        name,
+        "",
+        "*Mention:*",
+        f"<@{user_id}>",
+        "",
+        "*Channel:*",
+        channel,
+        "",
+        "*Joined:*",
+        format_timestamp(joined_ts),
+    ]
+    if inviter_id:
+        lines += ["", "*Invited By:*", f"<@{inviter_id}>"]
+    lines += ["", f"Please welcome them to #{channel_name}."]
     return "\n".join(lines)
 
 

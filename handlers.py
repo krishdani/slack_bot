@@ -64,6 +64,55 @@ def process_team_join(client, user_id, event_ts=None):
     )
 
 
+def process_member_joined_channel(client, event):
+    """DM the handler when someone joins one of the bot's channels.
+
+    Slack delivers ``member_joined_channel`` only for channels the bot is in, so
+    the set of watched channels is exactly the set the bot has joined (see the
+    ``/tasks/join-public`` endpoint). ``CHANNEL_JOIN_WATCHLIST`` narrows it
+    further when set.
+
+    The bot's own joins are ignored — ``/tasks/join-public`` would otherwise DM
+    the handler once per channel.
+    """
+    user_id = event.get("user")
+    channel_id = event.get("channel")
+    if not user_id or not channel_id:
+        return
+
+    if user_id == notify.bot_user_id(client):
+        logger.debug("channel_join_skipped reason=own_join channel=%s", channel_id)
+        return
+
+    if not config.REALTIME_CHANNEL_JOIN_ALERTS:
+        return
+
+    channel_name = notify.channel_name_of(client, channel_id)
+
+    if (
+        config.CHANNEL_JOIN_WATCHLIST
+        and channel_name.lower() not in config.CHANNEL_JOIN_WATCHLIST
+    ):
+        logger.debug("channel_join_skipped reason=not_watched channel=%s", channel_name)
+        return
+
+    logger.info("channel_join user=%s channel=%s", user_id, channel_name)
+
+    notify.notify_handler(
+        title=f"👋 New Member in #{channel_name}",
+        message=templates.channel_join_message(
+            name=notify.display_name_of(client, user_id),
+            user_id=user_id,
+            channel_name=channel_name,
+            channel_id=channel_id,
+            joined_ts=event.get("event_ts") or time.time(),
+            inviter_id=event.get("inviter"),
+        ),
+        priority="normal",
+        client=client,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Feature 2 — AI-powered channel moderation
 # --------------------------------------------------------------------------- #
@@ -182,6 +231,10 @@ def dispatch(client, event):
         user_id = user.get("id") if isinstance(user, dict) else user
         background.submit(process_team_join, client, user_id, event.get("event_ts"))
         return "process_team_join"
+
+    if event_type == "member_joined_channel":
+        background.submit(process_member_joined_channel, client, event)
+        return "process_member_joined_channel"
 
     if event_type == "message":
         background.submit(process_message_event, client, event)

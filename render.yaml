@@ -30,8 +30,14 @@ services:
       # --- Real-time alerts & moderation ---
       - key: REALTIME_MEMBER_ALERTS
         value: "on"
-      - key: MODERATION_ENABLED
+      # Alert on channel joins. Needs the `member_joined_channel` bot event.
+      - key: REALTIME_CHANNEL_JOIN_ALERTS
         value: "on"
+      # Empty = every channel the bot has joined.
+      - key: CHANNEL_JOIN_WATCHLIST
+        value: ""
+      - key: MODERATION_ENABLED
+        value: "off"
       - key: MODERATION_CONFIDENCE_THRESHOLD
         value: "0.7"
       - key: MODERATION_MIN_CHARS
