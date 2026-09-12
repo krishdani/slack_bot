@@ -10,8 +10,9 @@ The bot observes Slack and, once a day, DMs the Human POC a single report:
 
 It also alerts the handler in real time (see ``handlers.py``):
 
-  * the moment a new member joins, and
-  * whenever a message looks out of place for the channel it was posted in.
+  * the moment a new member joins,
+  * whenever a message looks out of place for the channel it was posted in, and
+  * optionally, a copy of every message anyone posts in any channel.
 
 Real-time work runs on a background pool so Slack always gets a fast 200.
 
@@ -19,6 +20,7 @@ Everything is a flag for the POC to review — the bot takes no action on users,
 and never replies in a public channel.
 """
 
+import json
 import logging
 import os
 import time
@@ -29,11 +31,13 @@ from flask import Flask, jsonify, request
 from slack_sdk.errors import SlackApiError
 
 import ai
+import background
 import collect
 import config
 import handlers
 import notify
 import store
+import templates
 from analysis import build_digest, count_flags, count_replies, format_daily_report
 from slack_verify import is_valid_slack_request
 
@@ -47,6 +51,11 @@ logger = logging.getLogger("tpf-community-bot")
 
 SLACK_BOT_TOKEN = config.SLACK_BOT_TOKEN
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+# Signing secret for the optional REPLY bot (two-bot mode). Its own app => its
+# own secret; it must not reuse the primary bot's.
+REPLY_SLACK_SIGNING_SECRET = os.environ.get("REPLY_SLACK_SIGNING_SECRET")
+# Same, for the optional RELAY bot (the "copy me every message" app).
+RELAY_SLACK_SIGNING_SECRET = os.environ.get("RELAY_SLACK_SIGNING_SECRET")
 DIGEST_TRIGGER_TOKEN = os.environ.get("DIGEST_TRIGGER_TOKEN")
 # The daily report covers this many hours of history (default 24).
 DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "24"))
@@ -62,6 +71,45 @@ if not config.HANDLER_SLACK_USER:
     )
 
 slack_client = config.get_slack_client()
+
+# Two-bot mode: a separate REPLY bot (its own Slack app/token) handles the AI
+# reply-suggestion feature on /slack/reply-events, while this primary app keeps
+# doing everything else (new-member alerts + moderation + the daily report).
+if config.TWO_BOT_MODE:
+    reply_slack_client = config.get_reply_slack_client()
+    if not REPLY_SLACK_SIGNING_SECRET:
+        logger.warning(
+            "REPLY_SLACK_BOT_TOKEN is set but REPLY_SLACK_SIGNING_SECRET is not — "
+            "the reply bot's requests will fail verification."
+        )
+    logger.info("Two-bot mode ON: reply suggestions served on /slack/reply-events.")
+else:
+    reply_slack_client = None
+
+# A third app can own the message relay (DM the handler a copy of every message)
+# on /slack/relay-events, so those DMs arrive from their own bot in the sidebar.
+if config.RELAY_BOT_MODE:
+    relay_slack_client = config.get_relay_slack_client()
+    if not RELAY_SLACK_SIGNING_SECRET:
+        logger.warning(
+            "RELAY_SLACK_BOT_TOKEN is set but RELAY_SLACK_SIGNING_SECRET is not — "
+            "the relay bot's requests will fail verification."
+        )
+    logger.info("Relay bot ON: message relay served on /slack/relay-events.")
+else:
+    relay_slack_client = None
+
+if not config.TWO_BOT_MODE and not config.RELAY_BOT_MODE:
+    logger.info("Single-bot mode: /slack/events handles everything.")
+
+if config.MESSAGE_RELAY_ENABLED:
+    logger.info(
+        "Message relay ENABLED — the handler is DM'd a copy of every message "
+        "(min_chars=%d threads=%s bots=%s). Set MESSAGE_RELAY_ENABLED=off to stop.",
+        config.MESSAGE_RELAY_MIN_CHARS,
+        config.MESSAGE_RELAY_INCLUDE_THREADS,
+        config.MESSAGE_RELAY_INCLUDE_BOTS,
+    )
 
 app = Flask(__name__)
 
@@ -100,8 +148,14 @@ def health():
     return jsonify(status="ok", service="tpf-community-bot")
 
 
-@app.route("/slack/events", methods=["POST"])
-def slack_events():
+def _handle_slack_events(signing_secret, client, capabilities):
+    """Shared handler for a Slack Events endpoint.
+
+    One code path serves both bots; the caller passes the signing secret and
+    client for its own app, plus ``capabilities`` — what that app is allowed to
+    do (see ``handlers.dispatch``). Verifies the signature, dedupes retries, and
+    dispatches to a background worker so Slack always gets a fast 200.
+    """
     # Raw body is required for signature verification — read it before parsing.
     raw_body = request.get_data()
     payload = request.get_json(silent=True) or {}
@@ -115,7 +169,7 @@ def slack_events():
 
     # 2. All other requests must carry a valid Slack signature.
     if not is_valid_slack_request(
-        signing_secret=SLACK_SIGNING_SECRET,
+        signing_secret=signing_secret,
         request_body=raw_body,
         timestamp=request.headers.get("X-Slack-Request-Timestamp", ""),
         signature=request.headers.get("X-Slack-Signature", ""),
@@ -138,10 +192,112 @@ def slack_events():
 
         # Hand off to a background worker. Anything slow (AI, DMs) happens
         # there, so we never hold Slack's 3-second window open.
-        handlers.dispatch(slack_client, event)
+        handlers.dispatch(client, event, capabilities=capabilities)
 
     # Always 200 quickly so Slack doesn't retry.
     return jsonify(ok=True)
+
+
+def _primary_capabilities():
+    """What the primary app handles: everything no other bot has claimed.
+
+    Each optional bot takes one capability off the primary's plate. With none
+    configured this returns None — 'do everything', the original single-bot
+    behaviour.
+    """
+    if not config.TWO_BOT_MODE and not config.RELAY_BOT_MODE:
+        return None
+    caps = {handlers.CAP_JOIN, handlers.CAP_MODERATION}
+    if not config.TWO_BOT_MODE:
+        caps.add(handlers.CAP_REPLY)
+    if not config.RELAY_BOT_MODE:
+        caps.add(handlers.CAP_RELAY)
+    return caps
+
+
+@app.route("/slack/events", methods=["POST"])
+def slack_events():
+    # The primary bot: new-member alerts + moderation + the daily report, plus
+    # any feature whose dedicated bot isn't configured.
+    return _handle_slack_events(
+        SLACK_SIGNING_SECRET, slack_client, _primary_capabilities()
+    )
+
+
+@app.route("/slack/reply-events", methods=["POST"])
+def slack_reply_events():
+    """Events endpoint for the optional REPLY bot (its own Slack app)."""
+    if not config.TWO_BOT_MODE:
+        return jsonify(error="reply bot not configured"), 503
+    return _handle_slack_events(
+        REPLY_SLACK_SIGNING_SECRET, reply_slack_client, {handlers.CAP_REPLY}
+    )
+
+
+@app.route("/slack/relay-events", methods=["POST"])
+def slack_relay_events():
+    """Events endpoint for the optional RELAY bot (its own Slack app).
+
+    Its only job: DM the handler a copy of every message posted in any channel.
+    """
+    if not config.RELAY_BOT_MODE:
+        return jsonify(error="relay bot not configured"), 503
+    return _handle_slack_events(
+        RELAY_SLACK_SIGNING_SECRET, relay_slack_client, {handlers.CAP_RELAY}
+    )
+
+
+@app.route("/slack/interactivity", methods=["POST"])
+def slack_interactivity():
+    """Handle interactive component clicks (currently the 'Send welcome DM' button).
+
+    The new-member alert lives on the primary app, so its button clicks are
+    verified with the primary signing secret. Slack sends these as a
+    form-encoded ``payload`` field; we verify the signature over the raw body,
+    hand the actual send off to a background worker, and 200 immediately.
+    """
+    raw_body = request.get_data()
+    if not is_valid_slack_request(
+        signing_secret=SLACK_SIGNING_SECRET,
+        request_body=raw_body,
+        timestamp=request.headers.get("X-Slack-Request-Timestamp", ""),
+        signature=request.headers.get("X-Slack-Signature", ""),
+    ):
+        logger.warning("Rejected interactivity request with invalid Slack signature.")
+        return jsonify(error="invalid signature"), 403
+
+    try:
+        payload = json.loads(request.form.get("payload", "{}"))
+    except (TypeError, ValueError):
+        logger.warning("interactivity: unparseable payload")
+        return "", 200
+
+    if payload.get("type") != "block_actions":
+        return "", 200  # nothing else is wired up yet
+
+    response_url = payload.get("response_url")
+    original_blocks = (payload.get("message") or {}).get("blocks")
+
+    for action in payload.get("actions", []):
+        if action.get("action_id") != templates.SEND_WELCOME_DM_ACTION:
+            continue
+        try:
+            data = json.loads(action.get("value") or "{}")
+        except (TypeError, ValueError):
+            data = {}
+        joiner_id = data.get("user_id")
+        joiner_name = data.get("name")
+        logger.info("interactivity: send_welcome_dm joiner=%s", joiner_id)
+        background.submit(
+            handlers.process_welcome_dm,
+            slack_client,
+            joiner_id,
+            joiner_name,
+            response_url,
+            original_blocks,
+        )
+
+    return "", 200
 
 
 def _authorized(req):

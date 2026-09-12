@@ -31,7 +31,11 @@ HANDLER_USER_ID = config.HANDLER_SLACK_USER
 _user_cache = {}
 _channel_cache = {}
 _workspace_name = None
-_bot_user_id = None
+# Bot identity is per-token: in two-bot mode the message bot and join bot have
+# different user ids, so this is keyed by client (token) rather than a single
+# global. The user/channel/workspace caches above are workspace data, identical
+# for both bots, so they stay shared.
+_bot_user_ids = {}
 
 # Prefixes that let the handler triage a DM at a glance.
 _PRIORITY_PREFIX = {"normal": "", "high": "", "urgent": "🚨 "}
@@ -55,6 +59,64 @@ def _slack_delay_hint(exc):
             except ValueError:
                 pass
     return None
+
+
+def _profile_field(profile, *keys):
+    for key in keys:
+        value = profile.get(key)
+        if value:
+            return value
+    return None
+
+
+def member_profile_data(client, user_id):
+    """Best-effort Slack profile enrichment for new-member alerts."""
+    profile = {
+        "name": "unknown",
+        "email": None,
+        "title": None,
+        "company": None,
+        "timezone": None,
+        "channels_joined": [],
+        "profile_link": None,
+    }
+    if not user_id:
+        return profile
+
+    try:
+        info = client.users_info(user=user_id).get("user", {})
+        profile_data = info.get("profile", {})
+        profile["name"] = (
+            profile_data.get("display_name")
+            or profile_data.get("real_name")
+            or info.get("name")
+            or user_id
+        )
+        profile["email"] = _profile_field(profile_data, "email")
+        profile["title"] = _profile_field(profile_data, "title")
+        profile["company"] = _profile_field(profile_data, "company")
+        profile["timezone"] = _profile_field(profile_data, "tz", "tz_label")
+        team_id = info.get("team_id")
+        if team_id:
+            profile["profile_link"] = f"https://app.slack.com/client/{team_id}/{user_id}"
+    except SlackApiError as e:
+        logger.warning("users_info failed for %s: %s", user_id, e.response.get("error"))
+
+    try:
+        resp = client.users_conversations(
+            user=user_id,
+            types="public_channel,private_channel",
+            limit=100,
+        )
+        profile["channels_joined"] = [
+            channel.get("name") or channel.get("id")
+            for channel in resp.get("channels", [])
+            if channel.get("name") or channel.get("id")
+        ]
+    except Exception as e:  # noqa: BLE001 — best-effort enrichment only
+        logger.debug("users_conversations failed for %s: %s", user_id, e)
+
+    return profile
 
 
 def display_name_of(client, user_id):
@@ -98,14 +160,18 @@ def channel_name_of(client, channel_id):
 
 
 def bot_user_id(client):
-    """Return (and cache) the bot's own Slack user id, or None if unavailable."""
-    global _bot_user_id
-    if _bot_user_id is None:
+    """Return (and cache) this client's own bot user id, or None if unavailable.
+
+    Cached per token so the message bot and join bot never share an identity.
+    """
+    key = getattr(client, "token", None) or id(client)
+    if key not in _bot_user_ids:
         try:
-            _bot_user_id = client.auth_test().get("user_id")
+            _bot_user_ids[key] = client.auth_test().get("user_id")
         except SlackApiError as e:
             logger.error("auth.test failed: %s", e.response.get("error"))
-    return _bot_user_id
+            return None  # don't cache a failure — retry next time
+    return _bot_user_ids[key]
 
 
 def workspace_name(client):
@@ -130,24 +196,31 @@ def permalink(client, channel_id, message_ts):
         return None
 
 
-def dm_user(client, user_id, text):
+def dm_user(client, user_id, text, blocks=None):
     """Open (or reuse) a DM with a user and post a message. Returns True/False.
 
     Transient failures (rate limits, 5xx, dropped connections) are retried with
     backoff. A permanent failure is logged and returns False — it never raises,
     because a failed notification must not take down the caller.
+
+    ``text`` is always sent (Slack uses it as the notification/fallback). When
+    ``blocks`` is given it drives the on-screen rendering, so ``text`` should
+    still summarise the same content for accessibility and push notifications.
     """
     if not user_id:
         return False
 
     def _send():
         im = client.conversations_open(users=user_id)
-        client.chat_postMessage(
-            channel=im["channel"]["id"],
-            text=text,
-            unfurl_links=False,
-            unfurl_media=False,
-        )
+        kwargs = {
+            "channel": im["channel"]["id"],
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        if blocks:
+            kwargs["blocks"] = blocks
+        client.chat_postMessage(**kwargs)
 
     try:
         with_retry(
@@ -174,7 +247,7 @@ def dm_poc(client, text):
     return dm_user(client, HUMAN_POC_USER_ID, text)
 
 
-def notify_handler(title, message, priority="normal", client=None):
+def notify_handler(title, message, priority="normal", client=None, blocks=None):
     """DM the configured community handler. The one entry point for alerts.
 
     Args:
@@ -183,6 +256,9 @@ def notify_handler(title, message, priority="normal", client=None):
         priority: 'normal' | 'high' | 'urgent'. Affects the visual prefix and
             the log level, never the destination.
         client: Slack client; defaults to the shared one from ``config``.
+        blocks: Optional Block Kit blocks (e.g. an alert with an action button).
+            When given they drive the rendering; ``title``/``message`` remain the
+            text fallback.
 
     Returns:
         True if Slack accepted the message, False otherwise. Never raises, so a
@@ -198,7 +274,9 @@ def notify_handler(title, message, priority="normal", client=None):
 
     client = client or config.get_slack_client()
     prefix = _PRIORITY_PREFIX.get(priority, "")
-    delivered = dm_user(client, HANDLER_USER_ID, f"{prefix}*{title}*\n\n{message}")
+    delivered = dm_user(
+        client, HANDLER_USER_ID, f"{prefix}*{title}*\n\n{message}", blocks=blocks
+    )
 
     log = logger.info if delivered else logger.error
     log(

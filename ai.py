@@ -143,27 +143,27 @@ _MODERATION_SYSTEM = (
     "link and requirements is a job posting.\n"
     "\n"
     "Rules:\n"
-    "- Default to belongs_to_channel=true. Return false ONLY when the message "
+    "- Default to correct_channel=true. Return false ONLY when the message "
     "clearly serves a purpose the channel is not for.\n"
     "- Greetings, thanks, short reactions, jokes and casual replies belong "
     "anywhere unless the channel explicitly forbids them.\n"
     "- If the message is ambiguous, truncated, or you cannot tell its intent, "
-    "return belongs_to_channel=true with a low confidence_score. Never guess.\n"
-    "- confidence_score (0.0-1.0) is your confidence in the belongs_to_channel "
-    "value you returned. Use scores above 0.9 only when the case is obvious.\n"
-    "- explanation: one or two plain sentences, grounded ONLY in the message text "
+    "return correct_channel=true with a low confidence. Never guess.\n"
+    "- confidence (0.0-1.0) is your confidence in the correct_channel value "
+    "you returned. Use scores above 0.9 only when the case is obvious.\n"
+    "- reason: one or two plain sentences, grounded ONLY in the message text "
     "and the channel's stated purpose. Never speculate about the author, their "
     "employer, or facts not present in the message. Never invent quotes.\n"
     "- suggested_channel: EXACTLY one channel name from the provided list, or "
-    "null. Never invent a channel. Use null when belongs_to_channel is true, or "
+    "null. Never invent a channel. Use null when correct_channel is true, or "
     "when no listed channel is a better home for the message.\n"
     "- suggested_reply: a short, warm, professional message the human manager "
     "could copy and send to the author. Address them by first name, thank them, "
     "name the better channel, ask them to repost, thank them for understanding. "
-    "Never scold, accuse, or threaten. Use null when belongs_to_channel is true.\n"
+    "Never scold, accuse, or threaten. Use null when correct_channel is true.\n"
     "\n"
-    'Return STRICT JSON only, exactly these keys: {"belongs_to_channel": bool, '
-    '"confidence_score": number, "explanation": string, "suggested_channel": '
+    'Return STRICT JSON only, exactly these keys: {"correct_channel": bool, '
+    '"confidence": number, "reason": string, "suggested_channel": '
     'string|null, "suggested_reply": string|null}'
 )
 
@@ -180,18 +180,23 @@ def _retriable_openai(exc):
 
 def _validate(raw, channel_name):
     """Coerce the model's JSON into the verdict shape, dropping anything unsafe."""
-    belongs = bool(raw.get("belongs_to_channel", True))
+    if isinstance(raw, dict) and "correct_channel" in raw:
+        belongs = bool(raw.get("correct_channel", True))
+    else:
+        belongs = bool(raw.get("belongs_to_channel", True))
 
     try:
-        confidence = float(raw.get("confidence_score", 0.0))
+        confidence = float(raw.get("confidence", raw.get("confidence_score", 0.0)))
     except (TypeError, ValueError):
         confidence = 0.0
     confidence = max(0.0, min(1.0, confidence))
 
-    explanation = str(raw.get("explanation") or "").strip()
+    explanation = str(raw.get("reason") or raw.get("explanation") or "").strip()
 
     # Anti-hallucination: only channels that actually exist in the config survive.
-    suggested_channel = channel_rules.resolve_suggested_channel(raw.get("suggested_channel"))
+    suggested_channel = channel_rules.resolve_suggested_channel(
+        raw.get("suggested_channel")
+    )
     if suggested_channel == f"#{channel_name.lstrip('#').lower()}":
         suggested_channel = None  # suggesting the channel it's already in is noise
 
@@ -274,3 +279,93 @@ def moderate_message(text, channel_name, author_name, rules):
         return None
 
     return _validate(raw, channel_name)
+
+
+# --------------------------------------------------------------------------- #
+# Reply suggestions
+# --------------------------------------------------------------------------- #
+
+_REPLY_SYSTEM = (
+    "You draft replies for a product-community manager on Slack. You are given "
+    "one message, the name of the channel it was posted in, and what that "
+    "channel is for. Draft a single reply the manager could send in that "
+    "channel.\n"
+    "\n"
+    "The manager reviews every draft and decides whether to send it — you never "
+    "post anything yourself.\n"
+    "\n"
+    "Guidance:\n"
+    "- Be warm, concise and genuinely helpful. Sound like a real person, not a "
+    "form letter. One short paragraph is usually enough.\n"
+    "- Address the author by first name when it reads naturally.\n"
+    "- If it's a question, actually try to answer or point them in the right "
+    "direction. If it's a statement or greeting, a brief acknowledgement is "
+    "fine.\n"
+    "- Never invent facts, links, dates, prices or commitments. If you don't "
+    "know something, say the manager will follow up rather than guessing.\n"
+    "- No @-mentions, no channel links, no markdown headings — just the message "
+    "text the manager would type.\n"
+    "\n"
+    'Return STRICT JSON only, exactly this key: {"suggested_reply": string}'
+)
+
+
+def suggest_reply(text, channel_name, author_name, rules=None):
+    """Draft a reply the handler could send to one channel message.
+
+    Args:
+        text: The raw message text.
+        channel_name: Channel name without '#'.
+        author_name: Display name, so the draft can greet them.
+        rules: The channel's entry from ``channel_rules`` (for context), or None.
+
+    Returns:
+        A non-empty draft string, or None when AI is disabled, the message is
+        empty, or every attempt failed. A None return means "no suggestion" —
+        the caller skips the DM rather than sending an empty one.
+    """
+    if not AI_ENABLED or not (text or "").strip():
+        return None
+
+    user_content = json.dumps(
+        {
+            "channel": channel_name,
+            "channel_purpose": (rules or {}).get("purpose"),
+            "author_display_name": author_name,
+            "message": text[:MODERATION_MAX_CHARS],
+        }
+    )
+
+    def _call():
+        resp = _get_client().chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.3,  # a little warmth; replies shouldn't read robotic
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _REPLY_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        return json.loads(resp.choices[0].message.content)
+
+    try:
+        raw = with_retry(
+            _call,
+            attempts=config.AI_MAX_RETRIES + 1,
+            retriable=_retriable_openai,
+            label="openai.suggest_reply",
+        )
+    except Exception as e:  # noqa: BLE001 — any failure means "no suggestion"
+        logger.error(
+            "reply_ai_failed channel=%s error=%s (no suggestion sent)",
+            channel_name, e,
+        )
+        return None
+
+    if not isinstance(raw, dict):
+        logger.error("reply_ai_bad_shape channel=%s payload=%r", channel_name, raw)
+        return None
+
+    reply = raw.get("suggested_reply")
+    reply = str(reply).strip() if reply else ""
+    return reply or None

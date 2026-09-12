@@ -9,9 +9,12 @@ back empty, is logged and dropped rather than raised.
 """
 
 import logging
+import re
 import time
 
+import ai
 import background
+import channel_rules
 import config
 import moderation
 import notify
@@ -28,6 +31,17 @@ _MODERATED_CHANNEL_TYPES = ("channel", "group")
 # --------------------------------------------------------------------------- #
 # Feature 1 — a new member joined
 # --------------------------------------------------------------------------- #
+
+
+def _is_noise_message(text):
+    """Return True for trivial messages that should never hit the AI."""
+    normalized = (text or "").strip()
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    if lowered in {"ok", "thanks", "thank you", "+1", "👍", "👎", "🙌", "lol"}:
+        return True
+    return not re.search(r"[A-Za-z0-9]", normalized)
 
 
 def process_team_join(client, user_id, event_ts=None):
@@ -51,17 +65,102 @@ def process_team_join(client, user_id, event_ts=None):
     if not config.REALTIME_MEMBER_ALERTS:
         return
 
-    notify.notify_handler(
-        title="🎉 New Member Joined",
-        message=templates.new_member_message(
-            name=notify.display_name_of(client, user_id),
+    try:
+        profile = notify.member_profile_data(client, user_id)
+        member_name = profile.get("name") or notify.display_name_of(client, user_id)
+        title = "🎉 New Member Joined"
+        body = templates.new_member_message(
+            name=member_name,
             user_id=user_id,
             joined_ts=event_ts or time.time(),
             workspace=notify.workspace_name(client),
-        ),
-        priority="normal",
-        client=client,
+            email=profile.get("email"),
+            title=profile.get("title"),
+            company=profile.get("company"),
+            timezone=profile.get("timezone"),
+            channels_joined=profile.get("channels_joined"),
+            profile_link=profile.get("profile_link"),
+        )
+        # With the feature on, the alert carries a button the handler can click
+        # to DM the joiner the fixed welcome message. Off => the plain alert.
+        blocks = (
+            templates.new_member_blocks(title, body, user_id, member_name)
+            if config.WELCOME_DM_ENABLED
+            else None
+        )
+        notify.notify_handler(
+            title=title,
+            message=body,
+            priority="normal",
+            client=client,
+            blocks=blocks,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting should never crash the worker
+        logger.exception("team_join_alert_failed user=%s error=%s", user_id, exc)
+
+
+def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, original_blocks=None):
+    """DM a new joiner the fixed welcome message — triggered by the handler's button.
+
+    Runs off the interactivity request thread (see ``app.py``) so Slack still
+    gets its fast 200. After sending, the original alert is updated via
+    ``response_url`` to drop the button and note whether the DM went out. Every
+    failure is logged and swallowed — a welcome that doesn't send must not crash
+    the worker.
+
+    When ``HANDLER_USER_TOKEN`` is configured the DM is sent with the handler's
+    user token, so the joiner sees it from a real person instead of the bot. If
+    that token is missing, revoked or rejected we fall back to the bot client —
+    a DM from the bot beats no welcome at all.
+    """
+    if not joiner_id:
+        logger.warning("welcome_dm_skipped reason=no_joiner_id")
+        return
+
+    # Profile lookups stay on the bot client: the user token isn't guaranteed to
+    # carry the `users:read` scope, and this is only used for the greeting name.
+    name = joiner_name or notify.display_name_of(client, joiner_id)
+    message = templates.welcome_dm_message(name)
+
+    as_user = config.get_handler_user_client()
+    sent_as = "bot"
+    delivered = False
+    if as_user is not None:
+        delivered = notify.dm_user(as_user, joiner_id, message)
+        sent_as = "handler"
+        if not delivered:
+            logger.warning(
+                "welcome_dm_user_token_failed joiner=%s — falling back to the bot",
+                joiner_id,
+            )
+            sent_as = "bot"
+
+    if not delivered:
+        delivered = notify.dm_user(client, joiner_id, message)
+
+    logger.info(
+        "welcome_dm joiner=%s delivered=%s sent_as=%s", joiner_id, delivered, sent_as
     )
+
+    if not response_url:
+        return
+
+    try:
+        from slack_sdk.webhook import WebhookClient
+
+        WebhookClient(response_url).send(
+            replace_original=True,
+            text=(
+                f"✅ Welcome DM sent to <@{joiner_id}>."
+                if delivered
+                else f"⚠️ Couldn't send the welcome DM to <@{joiner_id}>."
+            ),
+            blocks=templates.welcome_dm_sent_blocks(
+                original_blocks, joiner_id, delivered
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — updating the alert is best-effort
+        logger.warning("welcome_dm_update_failed joiner=%s error=%s", joiner_id, exc)
 
 
 def process_member_joined_channel(client, event):
@@ -134,6 +233,10 @@ def _skip_reason(client, event):
         return "not_a_channel"
 
     text = (event.get("text") or "").strip()
+    if not text:
+        return "empty"
+    if _is_noise_message(text):
+        return "noise"
     if len(text) < config.MODERATION_MIN_CHARS:
         return "too_short"
 
@@ -173,6 +276,8 @@ def process_message_event(client, event):
     channel_name = notify.channel_name_of(client, channel_id)
     author_name = notify.display_name_of(client, user_id)
 
+    logger.info("message_received channel=%s user=%s length=%d", channel_name, user_id, len(text))
+
     verdict = moderation.evaluate(text, channel_name, author_name)
     if verdict is None:
         logger.debug("moderation_skipped reason=channel_not_configured channel=%s",
@@ -190,20 +295,23 @@ def process_message_event(client, event):
         )
         return
 
-    notify.notify_handler(
-        title="⚠️ Channel Moderation Alert",
-        message=templates.moderation_alert(
-            channel_name=channel_name,
-            author_name=author_name,
-            author_id=user_id,
-            timestamp=ts,
-            text=text,
-            verdict=verdict,
-            permalink=notify.permalink(client, channel_id, ts),
-        ),
-        priority="high",
-        client=client,
-    )
+    try:
+        notify.notify_handler(
+            title="⚠️ Channel Moderation Alert",
+            message=templates.moderation_alert(
+                channel_name=channel_name,
+                author_name=author_name,
+                author_id=user_id,
+                timestamp=ts,
+                text=text,
+                verdict=verdict,
+                permalink=notify.permalink(client, channel_id, ts),
+            ),
+            priority="high",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting should never crash the worker
+        logger.exception("moderation_alert_failed channel=%s user=%s error=%s", channel_name, user_id, exc)
 
     logger.info(
         "moderation_alerted channel=%s author=%s source=%s confidence=%.2f "
@@ -214,30 +322,274 @@ def process_message_event(client, event):
 
 
 # --------------------------------------------------------------------------- #
+# Reply suggestions — DM the handler a draft reply for a channel message
+# --------------------------------------------------------------------------- #
+
+
+def _reply_skip_reason(client, event):
+    """Return why this message shouldn't get a reply suggestion, or None.
+
+    Deliberately lighter than ``_skip_reason``: by default it only drops things
+    a human could never reply to (bot posts, edits/joins, DMs, the bot's own
+    messages). Noise/length/thread filtering is opt-in via config, so the
+    default is 'draft for every real message'.
+    """
+    if not config.REPLY_SUGGESTIONS_ENABLED:
+        return "reply_suggestions_disabled"
+
+    if event.get("subtype") or event.get("bot_id"):
+        return "not_a_user_message"
+
+    if event.get("channel_type") not in _MODERATED_CHANNEL_TYPES:
+        return "not_a_channel"
+
+    text = (event.get("text") or "").strip()
+    if not text:
+        return "empty"  # nothing to reply to
+    if len(text) < config.REPLY_SUGGESTIONS_MIN_CHARS:
+        return "too_short"
+
+    thread_ts = event.get("thread_ts")
+    if (
+        thread_ts
+        and thread_ts != event.get("ts")
+        and not config.REPLY_SUGGESTIONS_INCLUDE_THREADS
+    ):
+        return "thread_reply"
+
+    user_id = event.get("user")
+    if not user_id:
+        return "no_author"
+    if user_id == notify.bot_user_id(client):
+        return "own_message"
+
+    return None
+
+
+def process_reply_suggestion(client, event):
+    """Draft a reply for one channel message and DM it to the handler.
+
+    Runs independently of moderation. If the AI can't produce a suggestion
+    (disabled or failed), nothing is sent — an empty draft has no value.
+    """
+    started = time.perf_counter()
+
+    skip = _reply_skip_reason(client, event)
+    if skip:
+        logger.debug("reply_suggestion_skipped reason=%s", skip)
+        return
+
+    channel_id = event.get("channel")
+    user_id = event.get("user")
+    text = (event.get("text") or "").strip()
+    ts = event.get("ts")
+
+    channel_name = notify.channel_name_of(client, channel_id)
+    author_name = notify.display_name_of(client, user_id)
+
+    rules = channel_rules.rules_for(channel_name)
+    draft = ai.suggest_reply(text, channel_name, author_name, rules)
+    if not draft:
+        logger.info(
+            "reply_suggestion_none channel=%s user=%s (AI disabled or failed)",
+            channel_name, user_id,
+        )
+        return
+
+    try:
+        notify.notify_handler(
+            title="💬 Suggested Reply",
+            message=templates.reply_suggestion(
+                channel_name=channel_name,
+                author_name=author_name,
+                author_id=user_id,
+                timestamp=ts,
+                text=text,
+                suggested_reply=draft,
+                permalink=notify.permalink(client, channel_id, ts),
+            ),
+            priority="normal",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting must not crash the worker
+        logger.exception(
+            "reply_suggestion_failed channel=%s user=%s error=%s",
+            channel_name, user_id, exc,
+        )
+
+    logger.info(
+        "reply_suggestion_sent channel=%s author=%s duration_ms=%d",
+        channel_name, user_id, (time.perf_counter() - started) * 1000,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Message relay — DM the handler a copy of every channel message
+# --------------------------------------------------------------------------- #
+
+# Subtypes that still mean "a human just posted something". Everything else
+# carrying a subtype (channel_join, message_changed, message_deleted, ...) is
+# not a new message and is never relayed.
+_RELAYABLE_SUBTYPES = (None, "", "file_share", "thread_broadcast", "me_message")
+
+
+def _relay_skip_reason(client, event):
+    """Return why this message shouldn't be relayed, or None to proceed.
+
+    The thinnest gate in the bot. Unlike ``_skip_reason`` and
+    ``_reply_skip_reason`` there is no noise filter and no length floor by
+    default: the handler asked to see *every* message, so the only things
+    dropped are ones that aren't a person posting in a channel — edits, joins,
+    DMs to the bot, other apps' posts, and the bot's own alerts.
+    """
+    if not config.MESSAGE_RELAY_ENABLED:
+        return "message_relay_disabled"
+
+    if event.get("subtype") not in _RELAYABLE_SUBTYPES:
+        return "not_a_new_message"
+
+    # Another app posted this. Relaying it (including our own DMs, which come
+    # back as bot posts) would drown the handler in machine chatter.
+    if event.get("bot_id") and not config.MESSAGE_RELAY_INCLUDE_BOTS:
+        return "bot_message"
+
+    if event.get("channel_type") not in _MODERATED_CHANNEL_TYPES:
+        return "not_a_channel"
+
+    text = (event.get("text") or "").strip()
+    if len(text) < config.MESSAGE_RELAY_MIN_CHARS:
+        return "too_short"
+
+    thread_ts = event.get("thread_ts")
+    if (
+        thread_ts
+        and thread_ts != event.get("ts")
+        and not config.MESSAGE_RELAY_INCLUDE_THREADS
+    ):
+        return "thread_reply"
+
+    user_id = event.get("user")
+    if not user_id:
+        return "no_author"
+    if user_id == notify.bot_user_id(client):
+        return "own_message"
+
+    return None
+
+
+def process_message_relay(client, event):
+    """DM the handler a copy of one channel message. No AI, no judgement.
+
+    Runs independently of moderation and reply suggestions: it reports that a
+    person posted, nothing more. A message with no text (a bare file share) is
+    still relayed — the permalink is the useful part there.
+    """
+    started = time.perf_counter()
+
+    skip = _relay_skip_reason(client, event)
+    if skip:
+        logger.debug("message_relay_skipped reason=%s", skip)
+        return
+
+    channel_id = event.get("channel")
+    user_id = event.get("user")
+    text = (event.get("text") or "").strip()
+    ts = event.get("ts")
+    thread_ts = event.get("thread_ts")
+
+    channel_name = notify.channel_name_of(client, channel_id)
+    author_name = notify.display_name_of(client, user_id)
+
+    try:
+        notify.notify_handler(
+            title="📨 New Message",
+            message=templates.message_relay(
+                channel_name=channel_name,
+                author_name=author_name,
+                author_id=user_id,
+                timestamp=ts,
+                text=text,
+                permalink=notify.permalink(client, channel_id, ts),
+                is_thread_reply=bool(thread_ts and thread_ts != ts),
+            ),
+            priority="normal",
+            client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — alerting must not crash the worker
+        logger.exception(
+            "message_relay_failed channel=%s user=%s error=%s",
+            channel_name, user_id, exc,
+        )
+        return
+
+    logger.info(
+        "message_relayed channel=%s author=%s length=%d duration_ms=%d",
+        channel_name, user_id, len(text), (time.perf_counter() - started) * 1000,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Dispatch
 # --------------------------------------------------------------------------- #
 
 
-def dispatch(client, event):
-    """Route a Slack event to its handler, off the request thread.
+# Capabilities a route may be limited to. Each optional extra bot claims one and
+# the primary keeps the rest; in single-bot mode a route passes capabilities=None
+# and does everything.
+CAP_JOIN = "join"            # new-member alerts (team_join)
+CAP_MODERATION = "moderation"  # channel moderation alerts (message)
+CAP_REPLY = "reply"          # AI reply suggestions (message)
+CAP_RELAY = "relay"          # copy of every message (message)
 
-    Unknown event types are ignored. Returns the name of the handler that was
+
+def dispatch(client, event, capabilities=None):
+    """Route a Slack event to its handler(s), off the request thread.
+
+    Args:
+        client: The Slack client to hand the handler — in two-bot mode each
+            route passes its own bot's client, so DMs come from the right bot.
+        event: The Slack event payload.
+        capabilities: Optional set restricting what this route does — any of
+            ``CAP_JOIN`` / ``CAP_MODERATION`` / ``CAP_REPLY`` / ``CAP_RELAY``. A
+            message can thus drive moderation on one bot, reply-drafting on
+            another and relaying on a third. None means do everything
+            (single-bot mode).
+
+    Unknown event types are ignored. Returns the name(s) of the handler(s)
     queued (useful for logging/tests), or None.
     """
     event_type = event.get("type")
 
+    def allowed(cap):
+        return capabilities is None or cap in capabilities
+
     if event_type == "team_join":
+        if not allowed(CAP_JOIN):
+            return None
         user = event.get("user")
         user_id = user.get("id") if isinstance(user, dict) else user
         background.submit(process_team_join, client, user_id, event.get("event_ts"))
         return "process_team_join"
 
     if event_type == "member_joined_channel":
+        if not allowed(CAP_JOIN):
+            return None
         background.submit(process_member_joined_channel, client, event)
         return "process_member_joined_channel"
 
     if event_type == "message":
-        background.submit(process_message_event, client, event)
-        return "process_message_event"
+        # Moderation, reply-suggestion and relay are independent. Each may live
+        # on its own bot; in single-bot mode all three run here.
+        queued = []
+        if allowed(CAP_MODERATION):
+            background.submit(process_message_event, client, event)
+            queued.append("process_message_event")
+        if allowed(CAP_REPLY):
+            background.submit(process_reply_suggestion, client, event)
+            queued.append("process_reply_suggestion")
+        if allowed(CAP_RELAY):
+            background.submit(process_message_relay, client, event)
+            queued.append("process_message_relay")
+        return ",".join(queued) if queued else None
 
     return None

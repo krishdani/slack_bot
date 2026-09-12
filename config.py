@@ -51,6 +51,24 @@ def _float(name, default):
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 
+# --- Optional second bot (reply suggestions as a separate Slack app) --------
+# Two sidebar bots require two Slack apps with two DIFFERENT tokens. When
+# REPLY_SLACK_BOT_TOKEN is set we run in "two-bot mode": this primary app keeps
+# doing everything it did before (new-member alerts + channel moderation + the
+# daily report), and a second REPLY bot handles the AI reply-suggestion feature
+# on its own route (/slack/reply-events) with its own token and signing secret.
+# Leave it unset to keep the single-bot behaviour unchanged.
+REPLY_SLACK_BOT_TOKEN = os.environ.get("REPLY_SLACK_BOT_TOKEN")
+TWO_BOT_MODE = bool(REPLY_SLACK_BOT_TOKEN)
+
+# --- Optional third bot (message relay as a separate Slack app) -------------
+# Same idea as the reply bot: its own Slack app, its own token and signing
+# secret, its own route (/slack/relay-events). Its single job is to DM the
+# handler a copy of every message posted in any channel it can see. Leave it
+# unset and the relay feature — if enabled at all — runs on the primary app.
+RELAY_SLACK_BOT_TOKEN = os.environ.get("RELAY_SLACK_BOT_TOKEN")
+RELAY_BOT_MODE = bool(RELAY_SLACK_BOT_TOKEN)
+
 # The community handler (POC) who receives every DM the bot sends.
 # HANDLER_SLACK_USER is the new name; HUMAN_POC_USER_ID is the name this project
 # already used. They identify the same person, so we accept either and prefer
@@ -58,6 +76,17 @@ SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 HANDLER_SLACK_USER = (
     os.environ.get("HANDLER_SLACK_USER") or os.environ.get("HUMAN_POC_USER_ID")
 )
+
+# --- Optional user token (post as the handler, not as the bot) --------------
+# A bot token always authors messages as the bot. To make the welcome DM come
+# from the handler's own Slack account it has to be sent with *their* user token
+# (xoxp-...), obtained by installing the app with the `chat:write` and
+# `im:write` USER scopes and copying the "User OAuth Token".
+#
+# This is a single fixed token, so every welcome DM is authored by whoever owns
+# it, regardless of who clicked the button. Leave it unset and the DM keeps
+# coming from the bot exactly as before.
+HANDLER_USER_TOKEN = os.environ.get("HANDLER_USER_TOKEN")
 
 # How many times a failed Slack write is retried before we give up and log it.
 SLACK_MAX_RETRIES = _int("SLACK_MAX_RETRIES", 3)
@@ -84,6 +113,12 @@ CHANNEL_JOIN_WATCHLIST = frozenset(
     for name in os.environ.get("CHANNEL_JOIN_WATCHLIST", "").split(",")
     if name.strip()
 )
+
+# Add a "Send welcome DM" button to the new-member alert. When the handler
+# clicks it, the bot DMs the new joiner the fixed welcome message
+# (templates.welcome_dm_message). Requires the app's Interactivity Request URL
+# to point at /slack/interactivity. Turn off to keep the plain text-only alert.
+WELCOME_DM_ENABLED = _bool("WELCOME_DM_ENABLED", True)
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +150,63 @@ AI_MAX_RETRIES = _int("AI_MAX_RETRIES", 2)
 
 
 # --------------------------------------------------------------------------- #
+# Reply suggestions (new feature)
+# --------------------------------------------------------------------------- #
+# For every channel message, draft a reply the handler could send and DM it to
+# them. This is INDEPENDENT of moderation: a message can produce a moderation
+# alert, a reply suggestion, both, or neither. Off-topic messages already carry
+# a suggested reply inside their moderation alert; this surfaces one for the
+# on-topic messages too.
+#
+# WARNING: with the defaults below this fires on *every* message, which in an
+# active workspace is a lot of DMs and a lot of OpenAI calls. Raise
+# REPLY_SUGGESTIONS_MIN_CHARS, turn REPLY_SUGGESTIONS_INCLUDE_THREADS off, or
+# set REPLY_SUGGESTIONS_ENABLED=off to dial it back — no redeploy of logic
+# needed, just the env var.
+
+REPLY_SUGGESTIONS_ENABLED = _bool("REPLY_SUGGESTIONS_ENABLED", True)
+
+# Skip messages shorter than this before drafting a reply. 0 = no minimum
+# (draft for everything, including "thanks" and one-word posts); 15 skips short
+# noise. The env var (see render.yaml) overrides this default.
+REPLY_SUGGESTIONS_MIN_CHARS = _int("REPLY_SUGGESTIONS_MIN_CHARS", 15)
+
+# Draft replies for thread replies too, not just top-level messages.
+REPLY_SUGGESTIONS_INCLUDE_THREADS = _bool("REPLY_SUGGESTIONS_INCLUDE_THREADS", True)
+
+
+# --------------------------------------------------------------------------- #
+# Message relay (new feature)
+# --------------------------------------------------------------------------- #
+# DM the handler a copy of *every* message posted in any channel the bot can
+# see: who said it, where, when, and the text itself. No AI, no judgement, no
+# threshold — if a human posted it, the handler hears about it.
+#
+# This is intentionally the bluntest feature in the bot. It is independent of
+# moderation and reply suggestions: one message can produce a relay, a
+# moderation alert, a reply suggestion, all three, or none.
+#
+# Defaults to ON only when RELAY_SLACK_BOT_TOKEN is set — i.e. configuring the
+# dedicated relay bot turns it on, and existing single-bot deployments keep
+# their current DM volume until they opt in explicitly.
+
+MESSAGE_RELAY_ENABLED = _bool("MESSAGE_RELAY_ENABLED", RELAY_BOT_MODE)
+
+# Relay messages shorter than this? 0 = relay everything, including "thanks"
+# and a lone emoji. That is the point of the feature, so 0 is the default;
+# raise it if the handler wants the noise filtered out.
+MESSAGE_RELAY_MIN_CHARS = _int("MESSAGE_RELAY_MIN_CHARS", 0)
+
+# Relay replies posted inside threads too, not just top-level messages.
+MESSAGE_RELAY_INCLUDE_THREADS = _bool("MESSAGE_RELAY_INCLUDE_THREADS", True)
+
+# Relay posts made by other bots/apps. Off by default: "someone" means a human,
+# and app posts (Zapier, Google Calendar, this bot's own alerts) would loop the
+# handler's DMs full of machine chatter.
+MESSAGE_RELAY_INCLUDE_BOTS = _bool("MESSAGE_RELAY_INCLUDE_BOTS", False)
+
+
+# --------------------------------------------------------------------------- #
 # Background processing
 # --------------------------------------------------------------------------- #
 
@@ -125,9 +217,42 @@ BACKGROUND_WORKERS = _int("BACKGROUND_WORKERS", 4)
 
 @lru_cache(maxsize=1)
 def get_slack_client():
-    """Return the process-wide Slack client.
+    """Return the process-wide Slack client (the primary / message bot).
 
     ``WebClient`` is a stateless HTTP wrapper, so it is safe to share across the
     Flask request threads and the background workers.
     """
     return WebClient(token=SLACK_BOT_TOKEN)
+
+
+@lru_cache(maxsize=1)
+def get_reply_slack_client():
+    """Return the process-wide Slack client for the REPLY bot.
+
+    Only meaningful in two-bot mode (``TWO_BOT_MODE``); callers guard on that
+    before using it, so this is never built with a ``None`` token in practice.
+    """
+    return WebClient(token=REPLY_SLACK_BOT_TOKEN)
+
+
+@lru_cache(maxsize=1)
+def get_handler_user_client():
+    """Return a Slack client authenticated as the handler, or None if unset.
+
+    Messages sent with this client are authored by the human who owns the token
+    rather than by the bot. Callers must treat ``None`` as "not configured" and
+    fall back to the bot client.
+    """
+    if not HANDLER_USER_TOKEN:
+        return None
+    return WebClient(token=HANDLER_USER_TOKEN)
+
+
+@lru_cache(maxsize=1)
+def get_relay_slack_client():
+    """Return the process-wide Slack client for the RELAY bot.
+
+    Only meaningful when ``RELAY_BOT_MODE`` is on; callers guard on that before
+    using it, so this is never built with a ``None`` token in practice.
+    """
+    return WebClient(token=RELAY_SLACK_BOT_TOKEN)
