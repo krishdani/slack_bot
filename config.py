@@ -106,6 +106,12 @@ REALTIME_MEMBER_ALERTS = _bool("REALTIME_MEMBER_ALERTS", True)
 # to point at /slack/interactivity. Turn off to keep the plain text-only alert.
 WELCOME_DM_ENABLED = _bool("WELCOME_DM_ENABLED", True)
 
+# Send that welcome DM automatically the moment someone joins, without waiting
+# for the button. It goes out as the HANDLER_USER_TOKEN owner when set (else the
+# bot). The handler's alert then notes it was sent instead of showing the
+# button; if the automatic send fails, the button is shown so they can retry.
+AUTO_WELCOME_DM = _bool("AUTO_WELCOME_DM", True)
+
 
 # --------------------------------------------------------------------------- #
 # Real-time channel moderation (Feature 2)
@@ -197,6 +203,32 @@ MESSAGE_RELAY_INCLUDE_THREADS = _bool("MESSAGE_RELAY_INCLUDE_THREADS", True)
 # and app posts (Zapier, Google Calendar, this bot's own alerts) would loop the
 # handler's DMs full of machine chatter.
 MESSAGE_RELAY_INCLUDE_BOTS = _bool("MESSAGE_RELAY_INCLUDE_BOTS", False)
+
+
+# --------------------------------------------------------------------------- #
+# Unreplied-message Telegram alerts (see unreplied.py)
+# --------------------------------------------------------------------------- #
+
+# If MESSAGE_RELAY_USER_ID hasn't replied in a channel message's thread within
+# UNREPLIED_AFTER_HOURS, send that message to UNREPLIED_TELEGRAM_CHAT_ID via the
+# TELEGRAM_BOT_TOKEN bot. Telegram rather than email because Render's free plan
+# blocks outbound SMTP. Runs when /tasks/unreplied-check is hit (cron-job.org,
+# every 15 min). Defaults to ON once both Telegram values are set.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+UNREPLIED_TELEGRAM_CHAT_ID = os.environ.get("UNREPLIED_TELEGRAM_CHAT_ID")
+UNREPLIED_ALERTS_ENABLED = _bool(
+    "UNREPLIED_ALERTS_ENABLED",
+    bool(TELEGRAM_BOT_TOKEN and UNREPLIED_TELEGRAM_CHAT_ID),
+)
+UNREPLIED_AFTER_HOURS = _float("UNREPLIED_AFTER_HOURS", 2.0)
+
+# Only alert on messages that went overdue within this many hours. Render's free
+# disk is wiped on restart, taking the "already alerted" list with it; this cap
+# stops a restart from re-sending a day's worth of old alerts.
+UNREPLIED_ALERT_WINDOW_HOURS = _float("UNREPLIED_ALERT_WINDOW_HOURS", 3.0)
+
+# How far back to read channel history for threads that may still need a reply.
+UNREPLIED_LOOKBACK_HOURS = _float("UNREPLIED_LOOKBACK_HOURS", 24.0)
 
 
 # --------------------------------------------------------------------------- #

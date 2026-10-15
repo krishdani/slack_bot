@@ -45,7 +45,9 @@ class ModerationFlowTests(unittest.TestCase):
             "profile_link": "https://example.slack.com/team/U123",
         }), patch("notify.display_name_of", return_value="Ada"), patch(
             "notify.workspace_name", return_value="Example"
-        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+        ), patch("config.AUTO_WELCOME_DM", False), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
             handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
 
         notify_handler.assert_called_once()
@@ -81,7 +83,9 @@ class ModerationFlowTests(unittest.TestCase):
             "notify.display_name_of", return_value="Ram"
         ), patch("notify.workspace_name", return_value="Example"), patch(
             "config.WELCOME_DM_ENABLED", True
-        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+        ), patch("config.AUTO_WELCOME_DM", False), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
             handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
 
         blocks = notify_handler.call_args.kwargs["blocks"]
@@ -98,10 +102,52 @@ class ModerationFlowTests(unittest.TestCase):
             "notify.display_name_of", return_value="Ram"
         ), patch("notify.workspace_name", return_value="Example"), patch(
             "config.WELCOME_DM_ENABLED", False
-        ), patch("notify.notify_handler", return_value=True) as notify_handler:
+        ), patch("config.AUTO_WELCOME_DM", False), patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
             handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
 
         self.assertIsNone(notify_handler.call_args.kwargs["blocks"])
+
+    def _join_with_auto_welcome(self, dm_delivered):
+        bot, as_user = object(), object()
+        with patch("store.record_member", return_value=True), patch(
+            "notify.bot_user_id", return_value=None
+        ), patch("notify.member_profile_data", return_value={"name": "Ram"}), patch(
+            "notify.display_name_of", return_value="Ram"
+        ), patch("notify.workspace_name", return_value="Example"), patch(
+            "config.WELCOME_DM_ENABLED", True
+        ), patch("config.AUTO_WELCOME_DM", True), patch(
+            "config.get_handler_user_client", return_value=as_user
+        ), patch("notify.dm_user", return_value=dm_delivered) as dm_user, patch(
+            "notify.notify_handler", return_value=True
+        ) as notify_handler:
+            handlers.process_team_join(bot, "U123", event_ts="1712345678.000200")
+        return as_user, dm_user, notify_handler
+
+    def test_team_join_auto_sends_welcome_dm_as_handler(self):
+        as_user, dm_user, notify_handler = self._join_with_auto_welcome(True)
+
+        dm_user.assert_called_once()
+        self.assertIs(dm_user.call_args.args[0], as_user)
+        self.assertEqual(dm_user.call_args.args[1], "U123")
+        self.assertTrue(dm_user.call_args.args[2].startswith("Hey Ram!"))
+        # The alert notes the DM went out and has no button to send it again.
+        blocks = notify_handler.call_args.kwargs["blocks"]
+        self.assertFalse(
+            any(b.get("block_id") == templates.WELCOME_DM_BLOCK_ID for b in blocks)
+        )
+        self.assertIn("Welcome DM sent", blocks[-1]["elements"][0]["text"])
+
+    def test_team_join_shows_button_when_auto_welcome_fails(self):
+        _, dm_user, notify_handler = self._join_with_auto_welcome(False)
+
+        # Handler token failed, then the bot fallback failed too.
+        self.assertEqual(dm_user.call_count, 2)
+        blocks = notify_handler.call_args.kwargs["blocks"]
+        self.assertEqual(
+            blocks[-1]["elements"][0]["action_id"], templates.SEND_WELCOME_DM_ACTION
+        )
 
     def test_process_welcome_dm_sends_fixed_message_to_joiner(self):
         client = object()
@@ -238,7 +284,7 @@ class ModerationFlowTests(unittest.TestCase):
         client = object()
         with patch("store.record_member", return_value=True), patch(
             "notify.bot_user_id", return_value=None
-        ), patch("notify.member_profile_data", side_effect=RuntimeError("boom")), patch("notify.display_name_of", side_effect=RuntimeError("boom")), patch("notify.workspace_name", return_value="Example"), patch("notify.notify_handler", side_effect=RuntimeError("boom")):
+        ), patch("notify.member_profile_data", side_effect=RuntimeError("boom")), patch("notify.display_name_of", side_effect=RuntimeError("boom")), patch("notify.workspace_name", return_value="Example"), patch("config.AUTO_WELCOME_DM", False), patch("notify.notify_handler", side_effect=RuntimeError("boom")):
             handlers.process_team_join(client, "U123", event_ts="1712345678.000200")
 
     # --- Reply suggestions --------------------------------------------------

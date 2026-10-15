@@ -1,4 +1,4 @@
-"""Tiny SQLite store — records who joined, for the daily report.
+"""Tiny SQLite store — records who joined, and which messages were alerted.
 
 The report fetches message history live from Slack (see collect.py), so no
 messages are stored. The only thing we keep is each member's join time, so the
@@ -33,6 +33,18 @@ def init_db():
             )
             """
         )
+        # Messages already sent as unreplied alerts (see unreplied.py), so the
+        # same message is never alerted twice.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unreplied_alerts (
+                channel_id TEXT NOT NULL,
+                ts         TEXT NOT NULL,
+                alerted_at REAL NOT NULL,
+                PRIMARY KEY (channel_id, ts)
+            )
+            """
+        )
 
 
 def record_member(user_id):
@@ -57,3 +69,23 @@ def get_members_since(epoch_seconds):
             (epoch_seconds,),
         ).fetchall()
     return [r["user_id"] for r in rows]
+
+
+def was_alerted(channel_id, ts):
+    """True if this message has already been sent as an unreplied alert."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM unreplied_alerts WHERE channel_id = ? AND ts = ?",
+            (channel_id, ts),
+        ).fetchone()
+    return row is not None
+
+
+def mark_alerted(channel_id, ts):
+    """Record that an unreplied alert went out for this message."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO unreplied_alerts (channel_id, ts, alerted_at) "
+            "VALUES (?, ?, ?)",
+            (channel_id, ts, time.time()),
+        )

@@ -38,6 +38,7 @@ import handlers
 import notify
 import store
 import templates
+import unreplied
 from analysis import build_digest, count_flags, count_replies, format_daily_report
 from slack_verify import is_valid_slack_request
 
@@ -362,6 +363,23 @@ def peek():
         "window_hours": DAILY_WINDOW_HOURS,
     }
     return jsonify(result)
+
+
+@app.route("/tasks/unreplied-check", methods=["GET", "POST"])
+def unreplied_check():
+    """Telegram the relay recipient about messages they haven't replied to.
+
+    Hit this every 15 minutes (cron-job.org). Scanning every channel can outlast
+    a cron service's timeout, so the work runs in the background and this
+    returns at once. The relay bot reads history when it's configured, since it
+    is the one that's in every relayed channel. Protect with DIGEST_TRIGGER_TOKEN.
+    """
+    if not _authorized(request):
+        return jsonify(error="unauthorized"), 401
+    if not config.UNREPLIED_ALERTS_ENABLED:
+        return jsonify(ok=False, error="unreplied alerts not configured"), 503
+    background.submit(unreplied.run_check, relay_slack_client or slack_client)
+    return jsonify(ok=True, queued=True), 202
 
 
 @app.route("/tasks/join-public", methods=["GET", "POST"])

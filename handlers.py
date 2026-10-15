@@ -45,11 +45,12 @@ def _is_noise_message(text):
 
 
 def process_team_join(client, user_id, event_ts=None):
-    """Record a new member and DM the handler in real time.
+    """Record a new member, welcome them, and DM the handler in real time.
 
     The member is recorded first, so the daily report still lists them even if
-    the DM fails. The bot never messages the member — the handler welcomes them
-    personally.
+    the DM fails. With ``AUTO_WELCOME_DM`` on, the joiner gets the fixed welcome
+    DM straight away (as the handler when ``HANDLER_USER_TOKEN`` is set);
+    otherwise the handler's alert carries a button to send it.
     """
     if not user_id or user_id == notify.bot_user_id(client):
         return
@@ -61,6 +62,15 @@ def process_team_join(client, user_id, event_ts=None):
         return
 
     logger.info("team_join user=%s recorded for the daily report", user_id)
+
+    # Welcome first: it doesn't depend on the handler alert being on, and the
+    # alert below reports whether it went out.
+    auto_welcomed = False
+    if config.AUTO_WELCOME_DM:
+        try:
+            auto_welcomed = process_welcome_dm(client, user_id, None)
+        except Exception as exc:  # noqa: BLE001 — the alert must still go out
+            logger.exception("auto_welcome_dm_failed user=%s error=%s", user_id, exc)
 
     if not config.REALTIME_MEMBER_ALERTS:
         return
@@ -81,13 +91,19 @@ def process_team_join(client, user_id, event_ts=None):
             channels_joined=profile.get("channels_joined"),
             profile_link=profile.get("profile_link"),
         )
-        # With the feature on, the alert carries a button the handler can click
-        # to DM the joiner the fixed welcome message. Off => the plain alert.
-        blocks = (
-            templates.new_member_blocks(title, body, user_id, member_name)
-            if config.WELCOME_DM_ENABLED
-            else None
-        )
+        # Already welcomed automatically => note it in place of the button.
+        # Otherwise, with the feature on, the alert carries a button the handler
+        # can click to DM the joiner the fixed welcome message. Off => plain alert.
+        if auto_welcomed:
+            blocks = templates.welcome_dm_sent_blocks(
+                templates.new_member_blocks(title, body, user_id, member_name),
+                user_id,
+                delivered=True,
+            )
+        elif config.WELCOME_DM_ENABLED:
+            blocks = templates.new_member_blocks(title, body, user_id, member_name)
+        else:
+            blocks = None
         notify.notify_handler(
             title=title,
             message=body,
@@ -100,7 +116,10 @@ def process_team_join(client, user_id, event_ts=None):
 
 
 def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, original_blocks=None):
-    """DM a new joiner the fixed welcome message — triggered by the handler's button.
+    """DM a new joiner the fixed welcome message; return True if it was delivered.
+
+    Triggered by the handler's button, or automatically on join when
+    ``AUTO_WELCOME_DM`` is on.
 
     Runs off the interactivity request thread (see ``app.py``) so Slack still
     gets its fast 200. After sending, the original alert is updated via
@@ -115,7 +134,7 @@ def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, origin
     """
     if not joiner_id:
         logger.warning("welcome_dm_skipped reason=no_joiner_id")
-        return
+        return False
 
     # Profile lookups stay on the bot client: the user token isn't guaranteed to
     # carry the `users:read` scope, and this is only used for the greeting name.
@@ -143,7 +162,7 @@ def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, origin
     )
 
     if not response_url:
-        return
+        return delivered
 
     try:
         from slack_sdk.webhook import WebhookClient
@@ -161,6 +180,7 @@ def process_welcome_dm(client, joiner_id, joiner_name, response_url=None, origin
         )
     except Exception as exc:  # noqa: BLE001 — updating the alert is best-effort
         logger.warning("welcome_dm_update_failed joiner=%s error=%s", joiner_id, exc)
+    return delivered
 
 
 # --------------------------------------------------------------------------- #

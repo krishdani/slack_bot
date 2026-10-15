@@ -49,6 +49,10 @@ services:
       # --- Real-time alerts & moderation ---
       - key: REALTIME_MEMBER_ALERTS
         value: "on"
+      # DM every new joiner the welcome message automatically (as the
+      # HANDLER_USER_TOKEN owner when set, else the bot).
+      - key: AUTO_WELCOME_DM
+        value: "on"
       - key: MODERATION_ENABLED
         value: "on"
       - key: MODERATION_CONFIDENCE_THRESHOLD
@@ -78,6 +82,15 @@ services:
         value: "on"
       - key: MESSAGE_RELAY_INCLUDE_BOTS
         value: "off"
+      # --- Unreplied-message Telegram alerts (/tasks/unreplied-check) ---
+      # Telegram the relay recipient about messages they haven't replied to in
+      # the thread within UNREPLIED_AFTER_HOURS. Ping the endpoint every 15 min.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: UNREPLIED_TELEGRAM_CHAT_ID
+        sync: false
+      - key: UNREPLIED_AFTER_HOURS
+        value: "2"
       # Off-request workers for AI + DM work, so Slack always gets a fast ack.
       # Keep gunicorn single-worker (default) so these threads are shared.
       - key: BACKGROUND_WORKERS
