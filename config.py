@@ -100,6 +100,20 @@ SLACK_MAX_RETRIES = _int("SLACK_MAX_RETRIES", 3)
 # daily report — joins are still recorded and still listed there.
 REALTIME_MEMBER_ALERTS = _bool("REALTIME_MEMBER_ALERTS", True)
 
+# DM the handler when someone joins one of the channels the bot is in. This is
+# separate from REALTIME_MEMBER_ALERTS: joining the workspace fires `team_join`,
+# joining a channel fires `member_joined_channel`, and a member can do either
+# without the other.
+REALTIME_CHANNEL_JOIN_ALERTS = _bool("REALTIME_CHANNEL_JOIN_ALERTS", True)
+
+# Restrict channel-join alerts to these channel names (comma-separated, '#'
+# optional). Empty means every channel the bot can see — the usual setup.
+CHANNEL_JOIN_WATCHLIST = frozenset(
+    name.strip().lstrip("#").lower()
+    for name in os.environ.get("CHANNEL_JOIN_WATCHLIST", "").split(",")
+    if name.strip()
+)
+
 # Add a "Send welcome DM" button to the new-member alert. When the handler
 # clicks it, the bot DMs the new joiner the fixed welcome message
 # (templates.welcome_dm_message). Requires the app's Interactivity Request URL

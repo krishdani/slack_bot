@@ -53,8 +53,14 @@ services:
       # HANDLER_USER_TOKEN owner when set, else the bot).
       - key: AUTO_WELCOME_DM
         value: "on"
-      - key: MODERATION_ENABLED
+      # Alert on channel joins. Needs the `member_joined_channel` bot event.
+      - key: REALTIME_CHANNEL_JOIN_ALERTS
         value: "on"
+      # Empty = every channel the bot has joined.
+      - key: CHANNEL_JOIN_WATCHLIST
+        value: ""
+      - key: MODERATION_ENABLED
+        value: "off"
       - key: MODERATION_CONFIDENCE_THRESHOLD
         value: "0.7"
       - key: MODERATION_MIN_CHARS
@@ -65,15 +71,16 @@ services:
         value: "off"
       # --- Reply suggestions --- (WARNING: 'on' DMs a draft for EVERY message)
       - key: REPLY_SUGGESTIONS_ENABLED
-        value: "on"
+        value: "off"
       - key: REPLY_SUGGESTIONS_MIN_CHARS
         value: "15"
       - key: REPLY_SUGGESTIONS_INCLUDE_THREADS
         value: "on"
       # --- Message relay --- (DMs a COPY of every message; no AI)
       - key: MESSAGE_RELAY_ENABLED
-        value: "on"
+        value: "off"
       # Slack member id of whoever receives the copies. Blank => the handler.
+      # Also whose replies /tasks/unreplied-check looks for.
       - key: MESSAGE_RELAY_USER_ID
         sync: false
       - key: MESSAGE_RELAY_MIN_CHARS

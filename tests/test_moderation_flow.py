@@ -4,6 +4,7 @@ from unittest.mock import patch
 from slack_sdk.errors import SlackApiError
 
 import ai
+import config
 import handlers
 import notify
 import templates
@@ -223,7 +224,9 @@ class ModerationFlowTests(unittest.TestCase):
 
     def test_process_message_event_alerts_wrong_channel_message(self):
         client = object()
-        with patch("notify.bot_user_id", return_value=None), patch("notify.channel_name_of", return_value="interview-prep"), patch(
+        # Pin the feature flag: this test covers the alert logic, not whether
+        # moderation happens to be switched on in the current deployment.
+        with patch("config.MODERATION_ENABLED", True), patch("notify.bot_user_id", return_value=None), patch("notify.channel_name_of", return_value="interview-prep"), patch(
             "notify.display_name_of", return_value="Ada"
         ), patch("notify.permalink", return_value="https://example.slack.com/"), patch(
             "notify.notify_handler", return_value=True
@@ -291,7 +294,9 @@ class ModerationFlowTests(unittest.TestCase):
 
     def test_reply_suggestion_dms_handler_with_draft(self):
         client = object()
-        with patch("notify.bot_user_id", return_value=None), patch(
+        # Pin the feature flag: this test covers the draft/DM logic, not whether
+        # reply suggestions happen to be switched on in the current deployment.
+        with patch("config.REPLY_SUGGESTIONS_ENABLED", True), patch("notify.bot_user_id", return_value=None), patch(
             "notify.channel_name_of", return_value="product-discussions"
         ), patch("notify.display_name_of", return_value="Ada"), patch(
             "notify.permalink", return_value="https://example.slack.com/"
